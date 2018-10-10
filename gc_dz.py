@@ -1,5 +1,5 @@
 """
- ------------- gc_dz.py version 1.00.03 September 2018 ------------
+ ------------- gc_dz.py version 1.00.04 October 2018 ------------
  This module handles all the server-side active content for the gc-dz.com 
  website.  It is called using the WSGI interface via the gc-dz.com/exec alias.  
  The entry point for /exec calls is the application() function.  This returns
@@ -742,6 +742,8 @@ def SCTN_tool(sid, environ=None):
     """    
     html += filter_form
     # construct the query for filtering the list of platforms 
+    # general exclusion for platforms with no data
+    has_data = " platid IN (SELECT platid FROM sctn.sheets) "
     if len(fidFlags)>0:
         # first empty flag_check table
         qry.execute('TRUNCATE sctn.flag_check');
@@ -755,23 +757,25 @@ def SCTN_tool(sid, environ=None):
         qry.execute(sqltext)
         # where string to select platforms
         where = """ WHERE platid IN (SELECT DISTINCT platid FROM sctn.platform_flags AS t 
-	    INNER JOIN sctn.flag_check AS f ON t.fid=f.fid AND (t.bit_or & f.flags)>0) 
-	    """
+	    INNER JOIN sctn.flag_check AS f ON t.fid=f.fid AND (t.bit_or & f.flags)>0) AND %s
+	    """ % has_data
     else:
 	    # no filters - empty where string        
-        where = ""
+        where = " WHERE %s" % has_data
     # retrieve a list of platforms subject to the filter condition
     sqltext = """SELECT p.platid, p.platname, p.platurl, o.orgnm, o.orgurl 
     FROM sctn.platforms AS p INNER JOIN sctn.organs AS o on p.orgid=o.orgid %s ORDER BY 2 
     """ % where   
     qry.execute(sqltext) 
     platforms = {}
+    alpha_order = []  # this retains orginal query order (alphabetical)
     if qry.rowcount>0:
         rows = qry.fetchall()     
         # convert retrieved list into a dictionary referenced by platform ID
         for row in rows:
             platforms[row['platid']] = {'platname': row['platname'], 'platurl': row['platurl'], \
-                    'orgnm': row['orgnm'], 'orgurl': row['orgurl']}                  
+                    'orgnm': row['orgnm'], 'orgurl': row['orgurl']}  
+            alpha_order.append(row['platid'])                        
     # ---------- data form section : controls display of columns -------------  
     # HTML for heading section of form
     data_form ="""
@@ -851,42 +855,43 @@ def SCTN_tool(sid, environ=None):
         np = 0
         bgnd = ['#ffffff','#f1f1f1']   # white, pale grey  
         # get set of rows to process
-       	qry.execute(sqltext)
-       	rows = qry.fetchall()
-       	# work through rows grouped by platforms
-       	for platid in platforms.keys():
-       	    # set row background color, increment platform counter afterwards
-       	    # odd rows get bgnd[1], even rows are bgnd[0]
-       	    bg = 'style="background-color: %s"' % bgnd[np % 2]
-       	    np += 1
-            # write platform name, url 
-            platform = platforms[platid]       	
-            html += """<TR><TD %(BG)s class="padded"><A class="sctn" href="%(URL)s" 
-            style=\"font-weight: bold; text-decoration: underline\" target=_blank>%(NAME)s</TD>""" \
-                % {'URL': platform['platurl'], 'NAME': platform['platname'], 'BG': bg }
-            # create columns based on keys in fidFlags dictionary
-            for fid in fidKeys:
-                if fid==0:
-                    # organization name - same format as platform name
-                    html += '<TD %(BG)s class="padded"><A class="sctn" href="%(URL)s" target=_blank>%(NAME)s</TD>' \
-                        % {'URL': platform['orgurl'], 'NAME': platform['orgnm'], 'BG': bg }
-                else:
-                    # there may be several entries for each fid number  
-                    html += "<TD %s class='padded'>" % bg      # start table cell
-                    br = ""                     # initially no break before line
-                    # scan data set for matching platform and feature id
-                    for row in rows:
-                        if row['fid'] == fid and row['platid']==platid:
-                            if row['flag'] & fidFlags[fid]:
-                                # use bold text
-                                html += br + "<SPAN style=\"font-weight: bold\">" + row['ftext'] + "</SPAN>"
-                            else:
-                                # normal text    
-                                html += br + row['ftext']
-                            br = "<BR>"  # break before start of next line
-                    html += "</TD>"   # end table cell
-            # end of row                
-            html += "</TR>"
+        qry.execute(sqltext)
+        rows = qry.fetchall()
+        # work through rows grouped by platforms
+        for platid in alpha_order:
+            if platid in platforms:
+                # set row background color, increment platform counter afterwards
+                # odd rows get bgnd[1], even rows are bgnd[0]
+                bg = 'style="background-color: %s"' % bgnd[np % 2]
+                np += 1
+                # write platform name, url 
+                platform = platforms[platid]
+                html += """<TR><TD %(BG)s class="padded"><A class="sctn" href="%(URL)s" 
+                style=\"font-weight: bold; text-decoration: underline\" target=_blank>%(NAME)s</TD>
+                """ % {'URL': platform['platurl'], 'NAME': platform['platname'], 'BG': bg }
+                # create columns based on keys in fidFlags dictionary
+                for fid in fidKeys:
+                    if fid==0:
+                        # organization name - same format as platform name
+                        html += '<TD %(BG)s class="padded"><A class="sctn" href="%(URL)s" target=_blank>%(NAME)s</TD>' \
+                            % {'URL': platform['orgurl'], 'NAME': platform['orgnm'], 'BG': bg }
+                    else:
+                        # there may be several entries for each fid number  
+                        html += "<TD %s class='padded'>" % bg      # start table cell
+                        br = ""                     # initially no break before line
+                        # scan data set for matching platform and feature id
+                        for row in rows:
+                            if row['fid'] == fid and row['platid']==platid:
+                                if row['flag'] & fidFlags[fid]:
+                                    # use bold text
+                                    html += br + "<SPAN style=\"font-weight: bold\">" + row['ftext'] + "</SPAN>"
+                                else:
+                                    # normal text    
+                                    html += br + row['ftext']
+                                br = "<BR>"  # break before start of next line
+                        html += "</TD>"   # end table cell
+                # end of row                
+                html += "</TR>"
         # end of table
         html += "</TBODY></TABLE>"
     else:
