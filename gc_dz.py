@@ -1,5 +1,5 @@
 """
- ------------- gc_dz.py version 1.00.04 October 2018 ------------
+ ------------- gc_dz.py version 0.09 Feb 2019 ------------
  This module handles all the server-side active content for the gc-dz.com 
  website.  It is called using the WSGI interface via the gc-dz.com/exec alias.  
  The entry point for /exec calls is the application() function.  This returns
@@ -11,12 +11,21 @@
  specific task required.
 """
 # Handles all website server requests via the /exec alias 
+# note that in development versions, /exec is substituted by /dev
+
+# --- revision history ---
+# v 0.07 25 Jan 2019  Adding code for revised login procedure via email link
+# v 0.08 08 Feb 2019  Menu system access from email link, also remove obsolete code
+# v 0.09 11 Feb 2019  Permit system finalised, landing page for F500
+# v 0.10 18 Feb 2019  Trase/Neural Alpha name matching tools implemented
+# ------------------------
  
 # CGI interface functions for Python
 # plus other common utilities
 import cgi, traceback, json
 import os, sys, re, datetime
 import random, string
+from urllib.parse import urlparse
 
 # Python modules for the email system and encryption
 from smtplib import SMTP
@@ -28,14 +37,21 @@ import hashlib
 import psycopg2
 import psycopg2.extras
 
+# trase/Neural Alpha toolkit
+from trasesdk import TraseCompaniesDB
+
 # local modules
 import dbauth
 
 def application(environ, start_response):
     """
-    entry point called by Apache 2.4 via mod_wsgi, aliased as gc-dz.com/exec
-    note the returned string must be of type byte, in [] wrapper otherwise 
-    you get a server error, with diagnostics only to Apache error log.
+    Entry point called by Apache 2.4 via mod_wsgi, aliased as gc-dz.com/exec.
+    Note that the returned string must be of type byte, in [] wrapper otherwise 
+    you get a server error, with diagnostics only to Apache error log.  The routine
+    basically decides whether this is an Ajax call, and if so invokes the Ajax handler,
+    or a normal page, in which case it calls the page selector.  It is also the top-level
+    error handler for the entire module, and returns an HTML-compatible trace-back
+    for any Python errors.
     """
     try:
         status = '200 OK'
@@ -48,19 +64,20 @@ def application(environ, start_response):
         # GC office, My house 
         permaddr = ['81.130.191.66','86.24.193.27']  
         # set link back to home page - available globally
-        global homeURL
-        homeURL = '%s://%s' % (environ['REQUEST_SCHEME'], environ['SERVER_NAME'])    
+        global homeURL, scriptnm
+        homeURL = '%s://%s' % (environ['REQUEST_SCHEME'], environ['SERVER_NAME']) 
+        scriptnm =  environ['SCRIPT_NAME']  
         # check if this is an Ajax request.  If so, go to the Ajax handler
         if environ.get('HTTP_X_REQUESTED_WITH','') == 'XMLHttpRequest':
             html = ajaxHandler(environ)
-            #html = "<P>Here I am by Ajax!</P>"
         # otherwise continue processing as a GET/POST request    
         elif (environ['REMOTE_ADDR'] not in permaddr) and (environ['REQUEST_SCHEME'] != "https"):
             # originating IP address not on permitted list - show error page
             #raise RuntimeError("Blocked user!!" )
-            html = error_page("Access not allowed (%s://%s )" % (environ['REQUEST_SCHEME'], environ['REMOTE_ADDR']))
+            html = error_page("Access not allowed (%s://%s )" % (environ['REQUEST_SCHEME'], environ['REMOTE_ADDR']), 1)
         else:
             # call main page    
+            #raise RuntimeError("Testing!" )
             html = page_selector(environ)
     except Exception as e:
         # handle any errors in code
@@ -104,57 +121,59 @@ def application(environ, start_response):
     return [output]
     
 def page_selector(environ):
-# checks login status and selects pages to display based, based on u and m parameters
-    params = cgi.parse_qs(environ['QUERY_STRING']) 
-    # check u parameter for session ID
-    sid = params.get('u', ['0'])[0]
-    # valid session IDs must be 16 characters a-zA-Z0-9
-    test_ptn =  re.compile('[a-zA-Z0-9\_]{16,16}')
-    if test_ptn.match(sid) is None:
-        # badly formed session ID
-        html = error_page("Incorrectly formed Session ID - Return to home page and log in")
-        return html
-    elif sid=='auto_login__sctn':
-        # log temporary user for stats then open SCTN page
-        ip = environ['REMOTE_ADDR'] 
-        sid = logTempUser(sid, ip)
-        html = SCTN_tool(sid)
-        return html
-    else:
-        # session ID format is OK - now look up to see if a valid login
-        qry = getCursor()
-        qry.execute("""
-            SELECT U.userid, U.permit FROM gcdz.users AS U INNER JOIN gcdz.logins AS L
-            ON U.userid=L.userid WHERE sessionid=%(SID)s AND timeout IS NULL
-            """, {'SID': sid})
-        # if no match, session does not exist or has timed out
-        if qry.rowcount<=0:
-            html = error_page("Session ID expired/invalid - Return to home page and log in")
-            return html
-    # at this point session has been validated.  Retrieve permit flags for this user        
-    flds = qry.fetchone()
-    pflag = flds['permit']
-    # use m parameter to select page/function
-    m = params.get('m', ['0'])[0]
-    if m=='test':
+    # checks login status and selects pages to display based, based on u and m parameters
+    (mdl, sid, pflag) = sessionStart(environ)
+    if mdl == 'menu':
         # invoke trasepad query tool
-        html = queryTool(environ)
-    elif m=='mail':
-        # test sending of smtp email
-        user_setup()
-        html = normal_reply("SMTP mailer test", "check email for test message")
-    elif m=='sctn':
+        html = mainMenu(sid, environ, pflag)     
+    elif mdl == 'cmatch':
+        # company lists and name matching
+        html = cmatch_tool(sid, environ)     
+    elif mdl == 'sctn':
         # SCTN survey system: latform list, platform detail, survey form
-        html = SCTN_sys(environ, sid)
-    elif m=='sctndd':
+        html = SCTN_sys(sid, environ)
+    elif mdl == 'sctndd':
         # SCTN data tool 
         html = SCTN_tool(sid, environ)
+    elif mdl.find("<HTML>") >= 0:
+        # html code has been returned, indicating an error page
+        html = mdl    
     else:
         # unrecognised module
-        html = error_page("Requested module '%s' is not available" % m)
+        html = error_page("Requested module '%s' is not available" % mdl)
     # return HTML for generated page to be displayed by server
     return html
 
+def mainMenu(sid, environ, pflag):
+    # displays the main menu - get the menu details
+    # sid - session ID, environ - Apache/WSGI environment array, pflag - permit flag for user)
+    qry = getCursor()
+    qry.execute("SELECT id, menutext, module, permitflag, prtorder FROM gcdz.menus ORDER BY prtorder")
+    if qry.rowcount<=0:
+        # if no rows, then a program/database error has occurred
+        raise RuntimeError("Menu system not found!!" )
+    # make template for link URL    
+    t_url = '%s://%s/%s?m=%%s&u=%%s' % (environ['REQUEST_SCHEME'], environ['SERVER_NAME'],environ['SCRIPT_NAME']) 
+    # style for disabled rows
+    styles = "<STYLE>li.gray {color: gray; }</STYLE>"
+    # create HTML page
+    html = HTML_header("Trasepad Menu", styles)
+    rows = qry.fetchall()     
+    # create list of menu items as links, which are disabled if permit not valid
+    html += "<UL>"
+    for row in rows:     
+        # add module name and session ID to link
+        url = t_url % (row['module'], sid)
+        # check if permit flag matches user
+        if (row['permitflag'] & pflag) or row['permitflag']==0:
+            # write line of HTML with link
+            html += "<LI><A href='%s'>%s</A>" % (url, row['menutext'])
+        else:
+            html += "<LI class='gray'>%s" % row['menutext']
+     # end list and do page footer   
+    html += "</UL>"
+    html += HTML_footer()
+    return html
 
 def ajaxHandler(environ):
 # process ajax requests
@@ -168,11 +187,10 @@ def ajaxHandler(environ):
         actid = postFields.get('action',['0'])[0]
         if actid=="login":
             # process login request
-            usernm = postFields.get('usernm',['0'])[0]
-            pwd = postFields.get('pwd',['0'])[0]
+            emailaddr = postFields.get('emailaddr',['0'])[0]
             ip = environ['REMOTE_ADDR']
-            (sid, msg) = user_login(usernm, pwd, ip)
-            json_str = json.dumps({'sid' : sid, 'msg' : msg, 'user': usernm})   
+            html = user_login(emailaddr, ip)
+            json_str = json.dumps({'html' : html})   
         elif actid=="session_check":
             # see if session ID exists and is still open
             sid = postFields.get('usernm',['0'])[0]  
@@ -199,44 +217,77 @@ def ajaxHandler(environ):
     # return results to Apache server via mod_wsgi interface (Application module)
     return json_str 
     
-def user_login(usernm, pwd, ip):
-# logs a user in.  If already logged in, closes last session and
-# issues a new session ID
-    # check username and password, get userid
+def user_login(emailaddr, ip):
+# checks an email address to see if a registered user.   If they are, sends
+# a link to the menu page with a session ID.  If not, returns a message to
+# the login page.  
+    # check email address, get userid
     qry = getCursor()
-    qry.execute("SELECT userid, hash FROM gcdz.users WHERE email=%(USERNM)s OR username=%(USERNM)s",
-        {'USERNM': usernm})
-    # if no match, user does not exist
+    qry.execute("SELECT userid FROM gcdz.users WHERE email=%s", (emailaddr,))
+    # if no match, user does not yet exist.
     if qry.rowcount<=0:
-        msg = "User not found!"
-        sid=""
-        return (sid, msg)
-    # check password
-    flds = qry.fetchone()
-    hash = hashlib.sha256(str.encode(pwd)).hexdigest()
-    hash2 = flds['hash']
-    # if hashes don't match, password is wrong
-    if hash != hash2 :
-        msg = "Password is wrong!"
-        sid=""
-        return (sid, msg)
-    # username and password have validated OK.    
-    # close any open sessions for this user
-    userid = flds['userid']
-    qry.execute("UPDATE gcdz.logins SET timeout=NOW() WHERE userid=%(USERID)s AND timeout IS NULL",
-        {'USERID': userid}) 
-    # get new session ID
-    sid = session_id()
-    # create login record
-    qry.execute("INSERT INTO gcdz.logins (userid, sessionid, timeon, ipaddr) VALUES (%(USERID)s, %(SID)s, NOW(), %(IP)s)",
-        {'USERID': userid, 'SID': sid, 'IP': ip}) 
-    if qry.rowcount!=1:
-        raise RuntimeError("Insert failed : %s" % qry.query)  
-    qry.connection.commit()      
-    # return session ID, empty message
-    msg=""
-    return (sid, msg)    
-
+        # regexes for email format checks
+        any_email = re.compile('[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}') # any email address
+        gc_email =  re.compile('[a-zA-Z0-9.-_]+@(sei|globalcanopy)\.org')  # GC or SEI domain
+        # check if text is in valid email address format
+        if any_email.match(emailaddr) is None:
+            # bold red message if not in email format
+            html='<P style="font-weight: bold; color: red">Please enter a valid email address!</P>'
+        elif gc_email.match(emailaddr) is None:
+            # see if this looks like a valid email address with either GC or SEI domain
+            html="""<P style="font-weight: bold; color: red"> Only GC and SEI staff or 
+            consultants can register to access this site.</P>  
+            <P>If you do not have an email with a @globalcanopy.org or @sei.org domain, please
+            email your details and justification for access to the Global Canopy Data Manager 
+            (<A href="mailto:d.alder@globalcanopy.org" target = _blank>d.alder@globalcanopy.org</A>).</P>
+            """
+        else:
+            html="""<P style="font-weight: bold; color: red">This email has not been
+            registered for access to this portal.</P>  
+            <P>Please contact the Global Canopy Data Manager 
+            (<A href="mailto:d.alder@globalcanopy.org" target = _blank>d.alder@globalcanopy.org</A>)
+            with your name and email, requesting access to this site.</P>  
+            """  
+    else:   
+        # close any open sessions for this user
+        flds = qry.fetchone()
+        userid = flds['userid']
+        qry.execute("UPDATE gcdz.logins SET timeout=NOW() WHERE userid=%(USERID)s AND timeout IS NULL",
+            {'USERID': userid}) 
+        # get new session ID
+        sid = session_id()
+        # create login record
+        qry.execute("INSERT INTO gcdz.logins (userid, sessionid, timeon, ipaddr) VALUES (%(USERID)s, %(SID)s, NOW(), %(IP)s)",
+            {'USERID': userid, 'SID': sid, 'IP': ip}) 
+        if qry.rowcount!=1:
+            raise RuntimeError("Insert failed : %s" % qry.query)  
+        qry.connection.commit()      
+        # provide menu link and session ID by email
+        mail_from = "noreply@gc-dz.com"    
+        mail_to = emailaddr
+        subject = "Login link for gc-dz.com"
+        text ="""
+        Please use the link below to access the Global Canopy Data portal.
+        
+        https://www.gc-dz.com/exec?m=menu&u=%s
+        
+        This link is only valid from this location and expires in 48 hours.
+        Use the login page to generate a new link as necessary.  
+        You will automatically be referred there if the link is invalid.  
+        Please contact me if any queries or problems.  
+        
+        Denis Alder
+        Data Manager, Global Canopy
+        d.alder@globalcanopy.org 
+        """ % sid
+        sendMail(mail_from, mail_to, subject, text)
+        # return text for home page
+        html="""<P>An email has been sent to %s with a link to portal.  Please use this link 
+        to enter the site.  It will expire in 48 hours and will only work from this location.</P>  
+        """  % emailaddr
+    # return text for home page 'reply_div' 
+    return html
+    
 def processQuery(postFields):
 # processes a query and returns result as an HTML table or error message string
     try:
@@ -274,53 +325,6 @@ def processQuery(postFields):
         'rec_by' : record_counter['by'],
         'rec_total' : record_counter['total']})          
     return json_str
-
-
-def HTML_header(title = "Data Manager Development Site", extras="", params =""):
-# standard HTML header for each page.  Title is inserted both as a meta tag and
-# as a title at the top of the visible page, beside the GC logo. Extras should
-# be complete (closed) HTML tags to be inserted in the <HEAD>...</HEAD> section
-# params are GET, POST and action attributes for the <BODY> tag
-    template = """
-    <!DOCTYPE html>
-    <HTML>
-    <HEAD>
-    <TITLE>Global Canopy Programme - %(title)s</TITLE>
-    <LINK href="https://www.gc-dz.com/main.css" rel="stylesheet"  type="text/css">
-    <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
-    <META charset="UTF-8">
-    %(extras)s
-    </HEAD>
-    <BODY %(params)s>
-    <a name="Top" id="Top"></a>
-    <p ><img src="https://www.gc-dz.com/img/gc.jpg" border=0 height=48px width=182px>
-    &nbsp;
-    <span style="font-size: x-large; font-weight: bold; color: black; text-align: left; vertical-align: 20px;">
-    %(title)s</span></p>
-    <p >&nbsp;</p>
-    <hr size=10 width=600 color="#BABF57" align="left" >
-    <p >&nbsp;</p>
-    """
-    # substitute parameters in template
-    html = template % {'title': title, 'extras': extras,  'params': params}
-    return html
-
-def HTML_footer(debug=""):
-# standard HTML footer with Home link
-    template = """
-    <p>&nbsp;</p>
-    <p><a href="%(HOME)s" title="Go to Home page">Home</a></p>
-    <P id='debug'>%(DEBUG)s</P>
-    </BODY>
-    </HTML>    
-    """
-    # add debugging material if debug string is non-blank
-    if debug>"":
-        debug = "<HR><BR>" + debug
-    # substitute link to home page and return code snippet for footer
-    global homeURL
-    html = template % {'HOME': homeURL, 'DEBUG': debug}
-    return html
    
 def queryTool(environ):
 # displays page and results for Trasepad Query Tool
@@ -379,65 +383,6 @@ def queryTool(environ):
     html += HTML_footer()
     return html
     
-def makeHTMLtable(qry, n=0, m=10, lines='LightBlue', altrows='LightCyan'):
-    """
-    creates an HTML table from a recordset result (psycopg2 cursor object)
-    records from n to m will be displayed.  If m<n, then n to n+m-1 records will 
-    be shown. If n<=0 or m<=0, all records will be shown.  Default is to show
-    first 10 records (n=1, m=10).  The table is put into its own <DIV>, with 
-    a local stylesheet (styles) inserted at the top if given.
-    """
-    if qry.rowcount==0:
-        return ""       # does nothing if no rows in cursor
-    html = '<hr size=2 width=600 color="#BABF57" align="left" ><BR>'
-    # add local styles if given.  This must be syntactically correct css stylesheet
-    # get column headings from description
-    colhdr = list()
-    for k in range(0, len(qry.description)):  # loop though column descriptions
-        colhdr.append(qry.description[k][0])    # save column names (item 0)
-    # style sheet for tables
-    # for named colour codes see https://www.w3schools.com/cssref/css_colors.asp
-    css_table ="""
-    <style>
-    table.t2 {
-        font-family: arial, sans-serif;
-        border-collapse: collapse;
-        width: 25%;
-    }
-    td.t2, th.t2 {
-        border: 1px solid LightBlue ;
-        text-align: left;
-        padding: 8px;
-    }
-    tr.t2:nth-child(even) {
-        background-color: LightCyan ;
-    }
-    </style>
-    """
-    html += css_table
-    #html += css_table % {'LINES': lines, 'ROWS': altrows}
-    # create the top row of table with column headings      
-    html += "<TABLE class='t2'><TR class='t2'>"  
-    for col in colhdr:
-        html += "<TH class='t2'>%s</TH>" % col
-    html += "</TR>"    
-    # check rows to be output
-    pass   #not coded yet, defaults assumed
-    # position cursor at first row (check does not exceed record count)
-    if n>=qry.rowcount: 
-        n=qry.rowcount-1
-    qry.scroll(n, mode='absolute')      # start from row n (default 1)
-    # fetch next m records
-    rows = qry.fetchmany(m)     
-    # create rest of table
-    for row in rows:               
-        html += "<TR class='t2'>" 
-        for col in row:
-            html += "<TD class='t2'>%s</TD>" % col
-        html += "</TR>"    
-    # return HTML for completed table
-    html += "</TABLE>"
-    return html           
 
 def logTempUser(sid, ip):
     """
@@ -460,8 +405,151 @@ def logTempUser(sid, ip):
         raise RuntimeError("Insert failed : %s" % qry.query)  
     qry.connection.commit()
     return sid      
+    
+def normal_reply(title, msg):
+    template = "<p>%s</p>"   
+    # substitute variable text in page template
+    html = HTML_header(title)
+    html += (template % msg)
+    html += HTML_footer()
+    # return HTML for page
+    return html
+    
+def error_page(msg, lgin=0):
+    # returns HTML for an error page, with message 'msg' in red bold
+    template = '<p style="font-weight:bold; color: red">%s</p>'
+    html = HTML_header("Data Manager Development Site")
+    html += (template % msg)
+    if lgin==0:
+        # standard 'Back link' on page footer
+        html += HTML_footer()
+    else:
+        # 'Login' link for bigger errors
+        html += """
+        <p>&nbsp;</p>
+        <p><A href="https://www.gc-dz.com">Login</A></p>
+        </BODY>
+        </HTML>    
+        """               
+    # return HTML for page
+    return html
+    
+def sendMail(fro, to, subject, text, server="localhost"):
+    msg = "From: %s\r\nTo: %s\r\nDate: %s\r\nSubject: %s\r\n\r\n%s" %  \
+        (fro, to, formatdate(localtime=True), subject, text)
+    smtp = SMTP()  
+    smtp.connect()  
+    smtp.sendmail(fro, to, msg)
+    smtp.close()
+    
+def getCursor():
+    # returns a database cursor for db 'trasepad'
+    # get a connection object for trasepad
+    db = dbauth.dbconn()
+    # make sure autocommit turned on
+    db.autocommit = True
+    # create PG cursor with dictionary keys for field names             
+    cur = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    return cur    
+   
+def session_id():
+# return 16-char random session id, method after stackoverflow.com q# 2257441
+    chars="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz"
+    # make random draw of 16 characters
+    qry = getCursor()
+    found = True
+    n=0
+    while found:
+        sid=""
+        for i in range(16):
+            sid += random.choice(chars)
+        # check session ID is unique (query returns row count zero)    
+        qry.execute("SELECT sessionid FROM gcdz.logins WHERE sessionid=%s",(sid,))
+        found = qry.rowcount>0
+        # check for looping error (not to lock up program)
+        n+=1
+        if n>10: 
+            raise RuntimeError("Generated session ID '%s' problematic" % sid) 
+    # supply unique session ID   
+    return sid    
 
-def SCTN_sys(environ, sid): 
+def sessionStart(environ):
+    # check session ID in URL.  Returns  a module name if valid,
+    # otherwise HTML text for the error page with a message.
+    #
+    # Function checks session ID exists, is open, and from current IP.
+    # It closes any session more than 48 hours old.
+    # It adds a record in the stats table for the module accessed.
+    #
+    params = cgi.parse_qs(environ['QUERY_STRING']) 
+    ip = environ['REMOTE_ADDR'] 
+    # check u parameter for session ID
+    sid = params.get('u', ['0'])[0]
+    mdl = params.get('m', ['0'])[0]
+    # html will be set only if an error condition occurs, otherwise it remains empty
+    # permissions also default to zero until otherwise set
+    html = "" 
+    pflag = 0
+    # valid session IDs must be 16 characters a-zA-Z0-9
+    test_ptn =  re.compile('[a-zA-Z0-9\_]{16,16}')
+    if test_ptn.match(sid) is None:
+        # badly formed session ID
+        html = error_page("Invalid parameters - Please log in again.", 1)
+        return (html, sid, pflag)
+    elif sid=='auto_login__sctn' and mdl=='sctndd':
+        # log temporary user for stats
+        sid = logTempUser(sid, ip)
+        return (mdl, sid, pflag)  
+    # session ID format is OK - now look up to see if a valid login
+    qry = getCursor()
+    # close any sessions more than 2 days old
+    qry.execute("""UPDATE gcdz.logins SET timeout=NOW() WHERE timeout IS NULL 
+        AND NOW()-timeout > '2 days' """ , {'SID': sid, 'IP': ip})
+    # if this session was started from a different IP, close it
+    qry.execute("""UPDATE gcdz.logins SET timeout=NOW() WHERE sessionid=%(SID)s AND timeout IS NULL 
+        AND ipaddr <> %(IP)s""" , {'SID': sid, 'IP': ip})        
+    # search for an open session    
+    qry.execute("""
+        SELECT U.userid, U.permit, L.timeon, L.ipaddr FROM gcdz.users AS U INNER JOIN gcdz.logins AS L
+        ON U.userid=L.userid WHERE sessionid=%(SID)s AND timeout IS NULL
+        """, {'SID': sid})
+    # if no match, session does not exist or has timed out
+    if qry.rowcount<=0:
+        html = error_page("Session ID has expired (limit 48 hours) or was from a different network - Please login again", 1)
+        return (html, sid, pflag)
+    # at this point session has been validated.  Retrieve permit flags for this user        
+    flds = qry.fetchone()
+    pflag = flds['permit']
+    if pflag is None:
+        pflag=0
+    # skip permissions check and timeon for the 'menu' module
+    if mdl != 'menu':
+        # see if allowed to access this module 
+        qry.execute("SELECT id FROM gcdz.menus WHERE module=%s AND ((permitflag & %s)>0 OR permitflag=0)", (mdl, pflag))
+        if qry.rowcount<=0:
+            html = error_page("This Session ID (%s) does not have permission to access module '%s'" % (sid, mdl), 1)
+            return (html, sid, pflag)
+        # add session ID and module name to stats table
+        qry.execute("INSERT INTO gcdz.stats (sessionid, module, timein) VALUES (%s, %s, NOW())", (sid, mdl))
+    return (mdl, sid, pflag)
+
+def sessionCheck(sid):
+    # checks if session ID is an open session, and if so, returns user name
+    # **** this is obsolete, retained for compatibility for time being ****
+    qry = getCursor()
+    qry.execute("""
+            SELECT U.username FROM gcdz.logins as L INNER JOIN gcdz.users AS U 
+            ON L.userid=U.userid WHERE L.sessionid=%s AND L.timeout IS NULL
+        """,(sid,))
+    if qry.rowcount > 0:
+        # get username
+        flds = qry.fetchone()
+        usernm = flds['username']
+    else:
+        usernm = ""
+    return usernm         
+
+def SCTN_sys(sid, environ): 
     # implements the SCTN meta-database system
     # set page header with javascript libraries, debug messages (empty)
     jslib = """
@@ -491,7 +579,7 @@ def SCTN_list(sid):
     # generates code for a listing of the SCTN companies
     # heading row
     hdr = """
-    <FORM action="/exec?m=sctn&u=%s" method="POST" id="listform">
+    <FORM action="%s?m=sctn&u=%s" method="POST" id="listform">
     <INPUT type="hidden" name="platid" id ="platid" value="0">
     <STYLE>TR:nth-child(even) {background-color: #f1f1f1}</STYLE>
     <TABLE style="max-width: 1000px; text-align:left">
@@ -503,7 +591,8 @@ def SCTN_list(sid):
     </TR>
     <TBODY>
     """
-    html = hdr % sid
+    global scriptnm
+    html = hdr % (scriptnm,sid)
     # open database connection
     qry = getCursor()
     # get the list of platforms
@@ -537,12 +626,12 @@ def SCTN_form(platid, sid):
     flds = qry.fetchone()
     pname = flds['platname']
     purl = flds['platurl']
-    
+    global scriptnm
     html = """
     <TABLE style="width: 1000px;">
         <TR><TD>Survey details for <B>%(NAME)s</B></TD>
             <TD><A href="%(URL)s" target=_blank>%(URL)s</A></TD>
-            <TD align="right"><A href="/exec?m=sctn&u=%(SID)s">Back to list</A></TD></TR>
+            <TD align="right"><A href="%(SCRIPT)s?m=sctn&u=%(SID)s">Back to list</A></TD></TR>
     </TABLE>        
     <BR>&nbsp;
     <STYLE>TR:nth-child(even) {background-color: #f1f1f1}</STYLE>
@@ -556,7 +645,7 @@ def SCTN_form(platid, sid):
     </TR>
     </THEAD>
     <TBODY>
-    """ % {'NAME': pname, 'URL': purl, 'SID': sid}
+    """ % {'NAME': pname, 'URL': purl, 'SID': sid, 'SCRIPT': scriptnm}
     # get sheetid for this platform (first sheet only, if duplicates)
     qry.execute("select sheetid from sctn.sheets where platid=%s order by sheetid limit 1", (platid,))
     shtid = qry.fetchone()['sheetid']
@@ -618,9 +707,10 @@ def SCTN_form(platid, sid):
             hrow = hrow.replace('#?', str(n))
         html += hrow       
     # finish off HTML form - back link on bottom row right
+    global scriptnm
     html += """<TR style="background-color: #ffffff"><TD COLSPAN='3'></TD>
-        <TD align='right'><A href='/exec?m=sctn&u=%s'>Back to list</A></TD>
-        </TR>""" % sid
+        <TD align='right'><A href='%s?m=sctn&u=%s'>Back to list</A></TD>
+        </TR>""" % (scriptnm, sid)
     html += "</TBODY></TABLE>"     
     return html
 
@@ -640,36 +730,43 @@ def SCTN_tool(sid, environ=None):
         requestBody = requestBody.decode('utf-8')
         postFields = cgi.parse_qs(requestBody)
     else:
-        # if no POST data, set postFields to None
-        postFields = None     
+        # no post data 
+        postFields = None
+    # set default columns if nothing selected
+    if postFields is None or len(postFields)==0:    
+        # set postFields to some default columns
+        postFields = {'C1': ['1'],'C3': ['1'],'C5': ['1'],'C6': ['1'],'C8': ['1'],'C10': ['1']}   
     # HTML for debugging info - left blank if none
     debug = ""
+    global scriptnm
     # HTML for the page header
     header = """
     <!DOCTYPE html>
     <HTML>
     <HEAD>
-    <TITLE>SCTN Data Directory</TITLE>
-    <LINK href="https://www.gc-dz.com/main.css" rel="stylesheet"  type="text/css">
+    <TITLE>SCTN Directory</TITLE>
+    <LINK href="https://www.gc-dz.com/sctn.css" rel="stylesheet"  type="text/css">
     <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
     <SCRIPT src="https://www.gc-dz.com/js/sctn.js"></SCRIPT>
     <META name="viewport" content="width=device-width, initial-scale=1.0">
     <META charset="UTF-8">
     </HEAD>
-    <BODY class="sctn">
-    <A name="Top" id="Top"></A>
+    <BODY onload="init()">
+    <A name=Top id=Top></A>
     <!-- page heading organized as a table -->
-    <TABLE class="sctn-list"><TR>
-        <TD style="width: 100px"><IMG src="https://www.gc-dz.com/img/sctn_logo.png" border=0 height=48px width=98px></TD>
-        <TD style="font-size: x-large; font-weight: bold; color: black; background-color: lightgray; text-align: center; vertical-align: middle;">
-        Directory of Platforms and Attributes</TD>
-    <TR><TD colspan="2" align="left">
-        <BUTTON class="sctn" id="btnFilter" onclick="toggleButton(1)">Select</Button>
-        <BUTTON class="sctn" id="btnData" onclick="toggleButton(2)">Columns</Button>
+    <TABLE><TR>
+        <TD class=narrow><IMG src="https://www.gc-dz.com/img/sctn_logo.png" border=0 height=48px width=98px></TD>
+        <TD align=center><H1>Directory</H1><P>Supply Chain Information Platforms</P></TD>
+    </TR>    
+    <TR><TD colspan=2><HR style="color: #f4fee7"></TD></TR>
+    <TR><TD colspan=2 align=center>
+        <BUTTON id=btnFilter onclick="toggleButton(1)">Filter</BUTTON><SMALL>&nbsp;&nbsp;Filter list by selected platform features</SMALL>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+        <BUTTON id=btnData onclick="toggleButton(2)">Columns</BUTTON><SMALL>&nbsp;&nbsp;Select feature columns to include in table</SMALL>
         <!-- <BUTTON class="sctn" id="btnStats" onclick="toggleButton(3)">Stats</Button> -->
     </TR></TABLE>    
-    <FORM action="/exec?m=sctndd&u=%s" method="POST">
-    """ % sid
+    <FORM action="%s?m=sctndd&u=%s" method=POST>
+    """ % (scriptnm, sid)
     html = header
     # initialise database cursor
     qry = getCursor()
@@ -677,9 +774,9 @@ def SCTN_tool(sid, environ=None):
     # form heading and table setup.  Form submit comes back here with SID set
     # and data in POST format.  Submit will hid the form.
     filter_form ="""
-    <DIV class="sctn-panel" id="filterForm" style="display: none">
-    <P class="sctn-data-panel">Show only platforms that include the selected features:</P>
-    <TABLE style="table-layout: fixed; width: 100%%"><TR>
+    <DIV class=sctn-panel id=filterForm>
+    <P class=sctn-data-panel>Show only platforms that include the selected features:</P>
+    <TABLE class=sctn-data-panel><TR>
     """
     # add top row for filter-form table headings
     qry.execute("SELECT fid, question, tablehdr FROM sctn.features ORDER BY fid")
@@ -700,7 +797,7 @@ def SCTN_tool(sid, environ=None):
         # get list of sub-category names
         fid = hdr['fid']
         colhdrs[fid] = hdr['tablehdr']
-        qry.execute("SELECT fid, lvl, ftext, flag FROM sctn.flevels WHERE fid=%s", (fid,))
+        qry.execute("SELECT fid, lvl, ftext, flag FROM sctn.flevels WHERE fid=%s ORDER BY lvl", (fid,))
         levels = qry.fetchall()
         # add cell for this category
         filter_form += '<TD class="sctn-panel-sub">'
@@ -736,14 +833,11 @@ def SCTN_tool(sid, environ=None):
         <P class="sctn-info">Click a column heading to select all.  
         &nbsp;Only platforms with a selected attribute will be listed.
         &nbsp;In the data table, columns with no selection will not be shown.</P>
-        <P style="margin-left: 10px; margin-top: 10px; margin-bottom: 10px">
-        <INPUT class="sctn-submit" type="submit" name="submit" value="Apply"></P>
-        </DIV>
+        <P class=button-spacer><INPUT class=sctn-submit type="submit" name="submit" value="Apply">
+        </P></DIV>
     """    
     html += filter_form
     # construct the query for filtering the list of platforms 
-    # general exclusion for platforms with no data
-    has_data = " platid IN (SELECT platid FROM sctn.sheets) "
     if len(fidFlags)>0:
         # first empty flag_check table
         qry.execute('TRUNCATE sctn.flag_check');
@@ -754,18 +848,22 @@ def SCTN_tool(sid, environ=None):
             sqlValues += comma + "(%s,%s)" % (f, fidFlags[f])
             comma = ","
         sqltext = "INSERT INTO sctn.flag_check VALUES " + sqlValues
+        #debug += "\n\nQuery at line %s:\n%s" % (773, sqltext)
         qry.execute(sqltext)
         # where string to select platforms
-        where = """ WHERE platid IN (SELECT DISTINCT platid FROM sctn.platform_flags AS t 
-	    INNER JOIN sctn.flag_check AS f ON t.fid=f.fid AND (t.bit_or & f.flags)>0) AND %s
-	    """ % has_data
+        where = """ WHERE platid IN (SELECT platid FROM (SELECT platid, count(*) as nr FROM sctn.platform_flags AS t 
+	    INNER JOIN sctn.flag_check AS f ON t.fid=f.fid AND (t.bit_or & f.flags)>0  GROUP BY 1 
+	    HAVING count(*)>=(SELECT count(*) AS nr FROM sctn.flag_check)) AS x) 
+	    AND  platid IN (SELECT platid FROM sctn.sheets)
+	    """ 
     else:
-	    # no filters - empty where string        
-        where = " WHERE %s" % has_data
+	    # no filters - but only list platforms which have data      
+        where = " WHERE platid IN (SELECT platid FROM sctn.sheets)"
     # retrieve a list of platforms subject to the filter condition
     sqltext = """SELECT p.platid, p.platname, p.platurl, o.orgnm, o.orgurl 
     FROM sctn.platforms AS p INNER JOIN sctn.organs AS o on p.orgid=o.orgid %s ORDER BY 2 
     """ % where   
+    #debug += "\n\nQuery at line %s:\n%s" % (785, sqltext)
     qry.execute(sqltext) 
     platforms = {}
     alpha_order = []  # this retains orginal query order (alphabetical)
@@ -776,11 +874,11 @@ def SCTN_tool(sid, environ=None):
             platforms[row['platid']] = {'platname': row['platname'], 'platurl': row['platurl'], \
                     'orgnm': row['orgnm'], 'orgurl': row['orgurl']}  
             alpha_order.append(row['platid'])                        
-    # ---------- data form section : controls display of columns -------------  
+    # ---------- columns form section : controls columns to be displayed -------------  
     # HTML for heading section of form
     data_form ="""
     <DIV class="sctn-data-panel" id="dataForm" style="display: none">
-    <P style="font-weight: bold; color: Teal;">Select columns to display:</P>
+    <P style="font-weight: bold; color: #466c13;">Select columns to display:</P>
     """
     # generate list of checkboxes for column headers
     chk=""
@@ -834,57 +932,54 @@ def SCTN_tool(sid, environ=None):
     # retrieve the row-column entries, indexed by platid (rows) and fid (columns)
     sqltext = """
     SELECT  v.platid, v.fid, L.ftext, L.flag FROM sctn.platform_flags AS v INNER JOIN sctn.flevels AS L 
-    ON v.fid=L.fid WHERE v.bit_or & L.flag >0 %s ORDER BY 1, 2;
+    ON v.fid=L.fid WHERE v.bit_or & L.flag >0 %s ORDER BY 1, 2, 4;
     """ % fidSet
+    #debug += "\n\nQuery at line %s:\n%s" % (856, sqltext)
     # initialise html for the table header, if there are rows to output
     #debug += "platforms type is : " + str(type(platforms)) + "\nlength " + str(len(platforms))
     #debug += "\n" + str(platforms)
     if len(platforms) > 0:
-        html += "<TABLE class='sctn-table'><THEAD><TR><TD class=\"hdr\">Platform name</TD>"
+        html += "<TABLE class='sctn-table'><THEAD><TR><TD>Platform name</TD>"
         # create columns based on keys in fidFlags 
         fidKeys = list(fidFlags.keys())
         fidKeys.sort()
         for fid in fidKeys:
             if fid==0:
-                html += "<TD class=\"hdr\">Organization</TD>"
+                html += "<TD>Organization</TD>"
             else:   
-                html += "<TD class=\"hdr\">%s</TD>" % colhdrs[fid]
+                html += "<TD>%s</TD>" % colhdrs[fid]
         # end of heading row        
-        html += "</TR></THEAD><TBODY class='scroll'>"
+        html += "</TR></THEAD><TBODY>"
         # platform counters and colours for row backgrounds
         np = 0
-        bgnd = ['#ffffff','#f1f1f1']   # white, pale grey  
+        bgnd = ['plainbg','greenbg']   # white, pale green  
         # get set of rows to process
         qry.execute(sqltext)
         rows = qry.fetchall()
         # work through rows grouped by platforms
         for platid in alpha_order:
             if platid in platforms:
-                # set row background color, increment platform counter afterwards
-                # odd rows get bgnd[1], even rows are bgnd[0]
-                bg = 'style="background-color: %s"' % bgnd[np % 2]
-                np += 1
                 # write platform name, url 
                 platform = platforms[platid]
-                html += """<TR><TD %(BG)s class="padded"><A class="sctn" href="%(URL)s" 
-                style=\"font-weight: bold; text-decoration: underline\" target=_blank>%(NAME)s</TD>
-                """ % {'URL': platform['platurl'], 'NAME': platform['platname'], 'BG': bg }
+                html += """<TR><TD><A class="sctn" href="%(URL)s" 
+                target=_blank>%(NAME)s</A></TD>
+                """ % {'URL': platform['platurl'], 'NAME': platform['platname']}
                 # create columns based on keys in fidFlags dictionary
                 for fid in fidKeys:
                     if fid==0:
                         # organization name - same format as platform name
-                        html += '<TD %(BG)s class="padded"><A class="sctn" href="%(URL)s" target=_blank>%(NAME)s</TD>' \
-                            % {'URL': platform['orgurl'], 'NAME': platform['orgnm'], 'BG': bg }
+                        html += '<TD><A class="sctn" href="%(URL)s" target=_blank>%(NAME)s</A></TD>' \
+                            % {'URL': platform['orgurl'], 'NAME': platform['orgnm']}
                     else:
                         # there may be several entries for each fid number  
-                        html += "<TD %s class='padded'>" % bg      # start table cell
-                        br = ""                     # initially no break before line
+                        html += "<TD>"                # start table cell
+                        br = ""                       # initially no break before line
                         # scan data set for matching platform and feature id
                         for row in rows:
                             if row['fid'] == fid and row['platid']==platid:
                                 if row['flag'] & fidFlags[fid]:
                                     # use bold text
-                                    html += br + "<SPAN style=\"font-weight: bold\">" + row['ftext'] + "</SPAN>"
+                                    html += br + "<B>" + row['ftext'] + "</B>"
                                 else:
                                     # normal text    
                                     html += br + row['ftext']
@@ -898,7 +993,7 @@ def SCTN_tool(sid, environ=None):
         # no data found that meets filer conditions
         html += "<P>-- No platforms match the filter conditions --</P>"    
     # set True to show Post fields in debug area
-    if False:           
+    if False:    
         debug += "\n\nPOST fields:\n"
         # list of POST fields
         for field in postFields.keys():
@@ -911,90 +1006,324 @@ def SCTN_tool(sid, environ=None):
     # close off page and return
     html += "</FORM></BODY></HTML>"
     return html
-    
-def normal_reply(title, msg):
-    template = "<p>%s</p>"   
-    # substitute variable text in page template
-    html = HTML_header(title)
-    html += (template % msg)
-    html += HTML_footer()
-    # return HTML for page
-    return html
-    
-def error_page(msg):
-    # returns HTML for an error page, with message 'msg' in red bold
-    template = '<p style="font-weight:bold; color: red">%s</p>'
-    html = HTML_header("Data Manager Development Site")
-    html += (template % msg)
-    html += HTML_footer()
-    # return HTML for page
-    return html
-    
-def user_setup():
-    # manages user registration and password resets via the email interface 
-    # test of email module
-    # Example:
-    t = datetime.datetime.now()
-    sendMail('d.alder@globalcanopy.org',
-        'post@denisalder.com',
-        'Email test',
-        'Message from gc_dz.com at %s' % t.ctime() )
 
-
-def sendMail(fro, to, subject, text, server="localhost"):
-    msg = "From: %s\r\nTo: %s\r\nDate: %s\r\nSubject: %s\r\n\r\n%s" %  \
-        (fro, to, formatdate(localtime=True), subject, text)
-    smtp = SMTP()  
-    smtp.connect()  
-    smtp.sendmail(fro, to, msg)
-    smtp.close()
-    
-def getCursor():
-    # returns a database cursor for db 'trasepad'
-    # get authorisation codes
-    (a, b) = dbauth.dbauth()
-    # open connection to db
-    db = psycopg2.connect(Fernet(a).decrypt(b).decode('utf-8')) 
-    db.autocommit
-    # create PG cursor with dictionary keys for field names             
-    cur = db.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    return cur    
-   
-def session_id():
-# return 16-char random session id, method after stackoverflow.com q# 2257441
-    chars="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz"
-    # make random draw of 16 characters
+def cmatch_tool(sid, environ):
+    # implements company listing and name matching tools
+    # the code is borrowed and adapted from SCTN tool, it shares similar style and mode of action
+    # get POST data if any and the name of the calling app (dev or exec)
+    contentLength = int(environ.get('CONTENT_LENGTH', 0))
+    requestBody = environ['wsgi.input'].read(contentLength)
+    requestBody = requestBody.decode('utf-8')
+    postFields = cgi.parse_qs(requestBody)
+    # set default POST values if none given
+    if len(postFields)==0:    
+        # set postFields to some default columns
+        postFields = {'Mode': ['None']}   
+    # HTML for debugging info - left blank if none
+    debug = ""
+    # name of calling script (exec or dev)
+    scriptnm =  environ['SCRIPT_NAME']  
+    # HTML for the page header and mode buttons
+    header = """
+    <!DOCTYPE html>
+    <HTML>
+    <HEAD>
+    <TITLE>Trasepad : Company Name Matching, Selection and Listing Tools</TITLE>
+    <LINK href="https://www.gc-dz.com/cmatch.css" rel="stylesheet"  type="text/css">
+    <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
+    <SCRIPT src="https://www.gc-dz.com/js/cmatch.js"></SCRIPT>
+    <META name="viewport" content="width=device-width, initial-scale=1.0">
+    <META charset="UTF-8">
+    </HEAD>
+    <BODY onload="init()">
+    <A name=Top id=Top></A>
+    <!-- page heading organized as a table -->
+    <FORM action="%s?m=cmatch&u=%s" method=POST>
+    <TABLE><TR>
+        <TD class=narrow><IMG src="https://www.gc-dz.com/img/gc.jpg" border=0 height=48px width=182px></TD>
+        <TD align=left ><H1>Company Name Matching, Selection and Listing Tools</H1></TD>
+    </TR> 
+    </TABLE>   
+    <HR style="border-width: 5px; width: 1000px; margin-left: 0;">
+    <P>
+    <INPUT type="submit" name="Mode" value="Match">&nbsp;&nbsp;<SMALL>Find matches for full or partial names</SMALL>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <INPUT type="submit" name="Mode" value="Filter">&nbsp;&nbsp;<SMALL>Select companies by attribute</SMALL>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+    <INPUT type="submit" name="Mode" value="List">&nbsp;&nbsp;<SMALL>List selection with chosen details</SMALL>
+    </P>
+    </FORM>    
+    """ % (scriptnm, sid)
+    html = header
+    mode = postFields['Mode'][0]
     qry = getCursor()
-    found = True
-    n=0
-    while found:
-        sid=""
-        for i in range(16):
-            sid += random.choice(chars)
-        # check session ID is unique (query returns row count zero)    
-        qry.execute("SELECT sessionid FROM gcdz.logins WHERE sessionid=%s",(sid,))
-        found = qry.rowcount>0
-        # check for looping error (not to lock up program)
-        n+=1
-        if n>10: 
-            raise RuntimeError("Generated session ID '%s' problematic" % sid) 
-    # supply unique session ID   
-    return sid    
+    if mode=="Match":
+        # segment of html for name matching tool
+        # set default data values for controls
+        dd = {'CLIST': '', 'TRASE_CHK': 'checked', 'F500_CHK': '', 'SIMPLE_CHK': 'checked','FULL_CHK': ''}    
+        # check if the 'GO' button has been clicked, and if so replace defaults with passed data
+        if postFields.get('Search',[''])[0] == 'Go':    
+            # save current settings as default values
+            dd['CLIST'] = postFields.get('clist',[''])[0]
+            dd['TRASE_CHK'] = 'checked' if postFields['search_opt'][0] == 'trase' else ''
+            dd['F500_CHK'] = 'checked' if postFields['search_opt'][0] == 'f500' else ''
+            dd['SIMPLE_CHK'] = 'checked' if postFields['output_opt'][0] == 'simple' else ''
+            dd['FULL_CHK'] = 'checked' if postFields['output_opt'][0] == 'full' else ''
+            qry.execute("""INSERT INTO gcdz.def_data (sessionid, ddtag, ddinfo) VALUES (%(SID)s, 'cmatch', %(DD)s)   
+                ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
+                """, {'SID': sid, 'DD': json.dumps(dd)}) 
+            # get list of names to check, method, and output format
+            nmlist =  re.split('\r\n', dd['CLIST'])
+            chktype =  postFields['search_opt'][0]
+            outfmt =  postFields['output_opt'][0]
+            # results of name check are returned as HTML
+            html += nameCheck(nmlist, chktype, outfmt)
+        else:             
+            # retrieve default values if GO was not clicked (as on first entry to this tool)
+            qry.execute("SELECT sessionid AS sid, ddtag, ddinfo FROM gcdz.def_data WHERE sessionid=%s AND ddtag='cmatch'", (sid,))
+            # defaults found, retrieve them to local variables
+            if qry.rowcount>0:
+                flds = qry.fetchone()
+                dd = flds['ddinfo']
+            # HTML for displayed form        
+            html += """
+            <FORM action="%(APP)s?m=cmatch&u=%(SID)s" method=POST>
+            <BR>&nbsp;<BR>
+            <TABLE class=match><TR style="vertical-align: top">
+                <TD>
+                    <TEXTAREA rows=14, cols=70 name="clist">%(CLIST)s</TEXTAREA>
+                </TD><TD style="font-size: small; padding-left: 30px;">
+                    Type or paste a list of names or name fragments.  For quick lookup, type a single name and click the GO button.
+                    <BR>&nbsp;<BR>
+                    <U>Method</U><BR>
+                    <INPUT type="radio" value="trase" name="search_opt" %(TRASE_CHK)s>&nbsp;&nbsp;Use trase/Neural Alpha toolkit<BR>
+                    <INPUT type="radio" value="f500" name="search_opt" %(F500_CHK)s>&nbsp;&nbsp;Search F500 companies
+                    <BR>&nbsp;<BR>
+                    <U>Output</U><BR>
+                    <INPUT type="radio" value="simple" name="output_opt" %(SIMPLE_CHK)s>&nbsp;&nbsp;Simple output (1 line per company)<BR>
+                    <INPUT type="radio" value="full" name="output_opt" %(FULL_CHK)s>&nbsp;&nbsp;All available detail (multiline per company)
+                    <BR>&nbsp;<BR>
+                    <INPUT type="submit" name="Search" value="Go">
+                </TD><TD>
+            </TR></TABLE>
+            <INPUT type="hidden" name="Mode" value="Match">
+            </FORM>        
+            """ % {'APP': scriptnm, 'SID': sid, 'CLIST': dd['CLIST'], 'TRASE_CHK': dd['TRASE_CHK'], 'F500_CHK': dd['F500_CHK'], \
+                'SIMPLE_CHK': dd['SIMPLE_CHK'],'FULL_CHK': dd['FULL_CHK']}
+    elif mode=="Filter":
+        pass
+    elif mode=="List":
+        pass    
+    html +=""
+    # ---- debugging information - list of POST fields ------
+    debug += "POST fields:<BR>"
+    # trap sensibly any errors loopong through list of lists
+    try:
+        # list of POST fields
+        for field in postFields.keys():
+            # each field is represented as a list of 1 or more items
+            for f in postFields[field]:
+                debug += '%s = %s<BR>' % (field, f) 
+    except Exception as e:
+        # if error occurs in above, just show traceback
+        debug += traceback.format_exc()
+    # -------------------------------------------------------
+    html += HTML_footer(debug, environ)
+    return html
 
-def sessionCheck(sid):
-    # checks if session ID is an open session, and if so, returns user name
-    qry = getCursor()
-    qry.execute("""
-            SELECT U.username FROM gcdz.logins as L INNER JOIN gcdz.users AS U 
-            ON L.userid=U.userid WHERE L.sessionid=%s AND L.timeout IS NULL
-        """,(sid,))
-    if qry.rowcount > 0:
-        # get username
-        flds = qry.fetchone()
-        usernm = flds['username']
+def nameCheck(nmlist, chktype, outfmt):
+# undertakes a name search and returns information on any matches in HTML format
+# nmlist - a list of names to be checked
+# chktype - 'trase' for trase/nural alpha engine, 'f500' for my own recipe
+# outfmt - output format, eith 'simple' (one line per company) or 'full'
+# -- first draft of routine simply explores what the trase/NA SDK gives back
+    # trase/NA API
+    api = TraseCompaniesDB("iiYrZqe3eX4fP5KD7RXIC5YlLehjaV7a5mj7dbfj")
+    # set table heading HTML for output
+    html = """<TABLE class=trase-full-list>
+                <TR><TH rowspan=2>Search term</TH>
+                <TH rowspan=2>Trase name</TH>
+                <TH rowspan=2>Juris.</TH>                
+                <TH rowspan=2>Alternate names</TH>
+                <TH colspan=2>Identifiers</TH></TR>
+                <TR><TD class=tflh>Type</TD><TD class=tflh>ID</TD></TR>
+                """ 
+    for nm in nmlist:
+        matches = api.match(nm, threshold=0.9, balance=0.5)
+        if len(matches) == 0:
+            # no match found
+            html += "<TR><TD>%s</TD><TD colspan=5>No matches found</TD></TR>" % nm
+        else:
+            # one or more matches
+            nr = len(matches)
+            # html for left hand column
+            html += "<TR><TD rowspan=%s>%s</TD>" % (nr, nm)
+            n=0
+            for item in matches:
+                # new row if more than first match
+                co = item['match']
+                if n>0:
+                    html += "<TR>"
+                # trase name
+                html += "<TD>%s</TD>" % co['name']
+                # jurisdiction - either country field if present or 
+                if 'country' in co:
+                    html += "<TD>%s</TD>" % co['country']
+                elif 'open-corporates' in co:
+                    html += "<TD>%s</TD>" % str(re.findall('http[s]*://opencorporates\.com/companies/([A-Za-z_]+)/',co['open-corporates'])[0]).upper()  
+                else:    
+                    html += "<TD>-</TD>"    
+                # alternate names
+                altnames = co['label']
+                html += "<TD>"
+                sep=""
+                for altnm in altnames:
+                    html += sep + altnm
+                    sep = "<BR>"
+                html += "</TD>" 
+                # identifiers for trase, LEI, Permid, Open-Corporates
+                td = ["", ""]     # td[0] has ID types, td[1] as ID values
+                nl = ""          # newline at start (none for 1st line, then <BR>)
+                if 'id' in co:
+                    td[0] += nl + "trase ID"
+                    td[1] += nl + co['id']
+                    nl = "<BR>"
+                if 'lei' in co:
+                    td[0] += nl + "LEI"
+                    td[1] += nl + co['lei']
+                    nl = "<BR>"
+                if 'permid' in co:
+                    td[0] += nl + "Permid"
+                    td[1] += nl + "<A href='%s' target=_blank>%s</A>" % (co['permid'], re.findall('http[s]*://permid\.org/(.+)',co['permid'])[0])
+                    nl = "<BR>"
+                if 'open-corporates' in co:
+                    td[0] += nl + "Op.Corp."
+                    td[1] += nl + "<A href='%s' target=_blank>%s</A>" % (co['open-corporates'], \
+                        re.findall('http[s]*://opencorporates\.com/companies/[A-Za-z_]+/(.+)',co['open-corporates'])[0])
+                    nl = "<BR>"
+                html += "<TD>%s</TD><TD>%s</TD>" % (td[0], td[1])  
+                # end of row 
+                html += "</TR>" 
+                n += 1
+    html += "</TABLE>"            
+    return html            
+
+def HTML_header(title = "Data Manager Development Site", extras="", params ="", width=600):
+# standard HTML header for each page.  Title is inserted both as a meta tag and
+# as a title at the top of the visible page, beside the GC logo. Extras should
+# be complete (closed) HTML tags to be inserted in the <HEAD>...</HEAD> section
+# params are GET, POST and action attributes for the <BODY> tag
+    template = """
+    <!DOCTYPE html>
+    <HTML>
+    <HEAD>
+    <TITLE>Global Canopy Programme - %(title)s</TITLE>
+    <LINK href="https://www.gc-dz.com/main.css" rel="stylesheet"  type="text/css">
+    <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
+    <META charset="UTF-8">
+    %(extras)s
+    </HEAD>
+    <BODY %(params)s>
+    <a name="Top" id="Top"></a>
+    <p ><img src="https://www.gc-dz.com/img/gc.jpg" border=0 height=48px width=182px>
+    &nbsp;
+    <span style="font-size: x-large; font-weight: bold; color: black; text-align: left; vertical-align: 20px;">
+    %(title)s</span></p>
+    <p >&nbsp;</p>
+    <hr size=10 width=%(width)s color="#BABF57" align="left" >
+    <p >&nbsp;</p>
+    """
+    # substitute parameters in template
+    html = template % {'title': title, 'extras': extras,  'params': params, 'width': width}
+    return html
+
+def HTML_footer(debug="", environ=None):
+    # standard HTML footer with back|menu link adn debugging material
+    # add debugging material below a red line if debug string is non-blank
+    if debug>"":
+        debug = "<HR style='color: red; border-width: 1px;'><BR>" + debug
+    # if no environment data, footer link simply replicates Back button     
+    if environ is None:
+        html = """
+        <p>&nbsp;</p>
+        <p style="text-decoration: underline; color: green; cursor: pointer;" onclick="window.history.back()" title="Back to previous page">Back</p>
+        <P id='debug'>%(DEBUG)s</P>
+        </BODY>
+        </HTML>    
+        """ % {'DEBUG': debug}
     else:
-        usernm = ""
-    return usernm         
+        # retrieve session ID and script name, then give return link to menu page
+        params = cgi.parse_qs(environ['QUERY_STRING']) 
+        sid = params.get('u', ['0'])[0]
+        scriptnm =  environ['SCRIPT_NAME']  
+        html = """
+        <p>&nbsp;</p>
+        <A href="https://www.gc-dz.com/%(APP)s?m=menu&u=%(SID)s" title="Return to menu">Menu</A>
+        <P id='debug'>%(DEBUG)s</P>
+        </BODY>
+        </HTML>    
+        """ % {'SID': sid, 'APP': scriptnm, 'DEBUG': debug}
+    return html
+
+def makeHTMLtable(qry, n=0, m=10, lines='LightBlue', altrows='LightCyan'):
+    """
+    creates an HTML table from a recordset result (psycopg2 cursor object)
+    records from n to m will be displayed.  If m<n, then n to n+m-1 records will 
+    be shown. If n<=0 or m<=0, all records will be shown.  Default is to show
+    first 10 records (n=1, m=10).  The table is put into its own <DIV>, with 
+    a local stylesheet (styles) inserted at the top if given.
+    """
+    if qry.rowcount==0:
+        return ""       # does nothing if no rows in cursor
+    html = '<hr size=2 width=600 color="#BABF57" align="left" ><BR>'
+    # add local styles if given.  This must be syntactically correct css stylesheet
+    # get column headings from description
+    colhdr = list()
+    for k in range(0, len(qry.description)):  # loop though column descriptions
+        colhdr.append(qry.description[k][0])    # save column names (item 0)
+    # style sheet for tables
+    # for named colour codes see https://www.w3schools.com/cssref/css_colors.asp
+    css_table ="""
+    <style>
+    table.t2 {
+        font-family: arial, sans-serif;
+        border-collapse: collapse;
+        width: 25%;
+    }
+    td.t2, th.t2 {
+        border: 1px solid LightBlue ;
+        text-align: left;
+        padding: 8px;
+    }
+    tr.t2:nth-child(even) {
+        background-color: LightCyan ;
+    }
+    </style>
+    """
+    html += css_table
+    #html += css_table % {'LINES': lines, 'ROWS': altrows}
+    # create the top row of table with column headings      
+    html += "<TABLE class='t2'><TR class='t2'>"  
+    for col in colhdr:
+        html += "<TH class='t2'>%s</TH>" % col
+    html += "</TR>"    
+    # check rows to be output
+    pass   #not coded yet, defaults assumed
+    # position cursor at first row (check does not exceed record count)
+    if n>=qry.rowcount: 
+        n=qry.rowcount-1
+    qry.scroll(n, mode='absolute')      # start from row n (default 1)
+    # fetch next m records
+    rows = qry.fetchmany(m)     
+    # create rest of table
+    for row in rows:               
+        html += "<TR class='t2'>" 
+        for col in row:
+            html += "<TD class='t2'>%s</TD>" % col
+        html += "</TR>"    
+    # return HTML for completed table
+    html += "</TABLE>"
+    return html           
 
 # when run from the command line for testing, does a simple compile check
 if __name__ == '__main__':
