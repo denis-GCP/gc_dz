@@ -1,5 +1,5 @@
 """
- ------------- gc_dz.py version 0.09 Feb 2019 ------------
+ ------------- gc_dz.py version 0.11 Feb 2019 ------------
  This module handles all the server-side active content for the gc-dz.com 
  website.  It is called using the WSGI interface via the gc-dz.com/exec alias.  
  The entry point for /exec calls is the application() function.  This returns
@@ -18,6 +18,7 @@
 # v 0.08 08 Feb 2019  Menu system access from email link, also remove obsolete code
 # v 0.09 11 Feb 2019  Permit system finalised, landing page for F500
 # v 0.10 18 Feb 2019  Trase/Neural Alpha name matching tools implemented
+# v 0.11 22 Feb 2019  Forest 500 company listing/selection
 # ------------------------
  
 # CGI interface functions for Python
@@ -64,7 +65,7 @@ def application(environ, start_response):
         # GC office, My house 
         permaddr = ['81.130.191.66','86.24.193.27']  
         # set link back to home page - available globally
-        global homeURL, scriptnm
+        global homeURL, scriptnm  # *** this needs to be changed, globals inhibit modularization
         homeURL = '%s://%s' % (environ['REQUEST_SCHEME'], environ['SERVER_NAME']) 
         scriptnm =  environ['SCRIPT_NAME']  
         # check if this is an Ajax request.  If so, go to the Ajax handler
@@ -122,18 +123,22 @@ def application(environ, start_response):
     
 def page_selector(environ):
     # checks login status and selects pages to display based, based on u and m parameters
+    # mdl is module to be run; sid is session ID;  pflag is user's permissions (bitwise flags)
     (mdl, sid, pflag) = sessionStart(environ)
     if mdl == 'menu':
-        # invoke trasepad query tool
+        # display menus - either active or disabled (grayed out) if not permitted for this user
         html = mainMenu(sid, environ, pflag)     
     elif mdl == 'cmatch':
         # company lists and name matching
         html = cmatch_tool(sid, environ)     
+    elif mdl == 'f500':
+        # company lists and name matching
+        html = f500_main(sid, environ)     
     elif mdl == 'sctn':
         # SCTN survey system: latform list, platform detail, survey form
         html = SCTN_sys(sid, environ)
     elif mdl == 'sctndd':
-        # SCTN data tool 
+        # SCTN data tool.  This is used by SCTN website.  Test any mods carefully! 
         html = SCTN_tool(sid, environ)
     elif mdl.find("<HTML>") >= 0:
         # html code has been returned, indicating an error page
@@ -174,15 +179,27 @@ def mainMenu(sid, environ, pflag):
     html += "</UL>"
     html += HTML_footer()
     return html
+    
+def getPostFields(environ, getRequest=False):
+    # returns the fields in the POST request.  They are returned as a dictionary
+    # indexed by the NAME attribute from the HTML tag.  Each field is a sequence
+    # as NAMEs may be repeated, so the first entry for field 'x' is postfields['x'][0]
+    contentLength = int(environ.get('CONTENT_LENGTH', 0))
+    requestBody = environ['wsgi.input'].read(contentLength)
+    requestBody = requestBody.decode('utf-8')
+    postFields = cgi.parse_qs(requestBody)
+    # return both postFields and requestBody as a tuple if getRequest is true,
+    # otherwise just the postFields
+    if getRequest:
+        return (postFields, requestBody)    
+    else:
+        return postFields    
 
 def ajaxHandler(environ):
 # process ajax requests
     try:
         # get post data 
-        contentLength = int(environ.get('CONTENT_LENGTH', 0))
-        requestBody = environ['wsgi.input'].read(contentLength)
-        requestBody = requestBody.decode('utf-8')
-        postFields = cgi.parse_qs(requestBody)
+        (postFields, requestBody) = getPostFields(environ, True)
         # get action ID and call approriate action based on that
         actid = postFields.get('action',['0'])[0]
         if actid=="login":
@@ -191,19 +208,12 @@ def ajaxHandler(environ):
             ip = environ['REMOTE_ADDR']
             html = user_login(emailaddr, ip)
             json_str = json.dumps({'html' : html})   
-        elif actid=="session_check":
-            # see if session ID exists and is still open
-            sid = postFields.get('usernm',['0'])[0]  
-            usernm = sessionCheck(sid)                
-            json_str = json.dumps({'user': usernm})                 
-        elif actid=="register":
-            # process user registration
-            json_str = json.dumps({'ok': 0, 
-                'sid' : "",
-                'msg' : "registration not yet implemented"})                 
-        elif actid=="query":
-             # process a query
-            json_str = processQuery(postFields) 
+        elif actid=="f500.colist":
+            # forest 500 company list matching 'cofind'
+            cofind = postFields.get('cofind',['0'])[0]  
+            sid = postFields.get('sid',['0'])[0]  
+            html = f500_cofind(sid, cofind)
+            json_str = json.dumps({'html' : html})   
         else:
             # unknown action requested   
             raise RuntimeError("Unknown Action '%s' requested" % actid)
@@ -326,63 +336,6 @@ def processQuery(postFields):
         'rec_total' : record_counter['total']})          
     return json_str
    
-def queryTool(environ):
-# displays page and results for Trasepad Query Tool
-    # template for form with text area.
-    #url = '%s://%s%s' % (environ['REQUEST_SCHEME'], environ['SERVER_NAME'], environ['REQUEST_URI'])
-    template = """
-    <STYLE>
-    td {
-        color: gray;
-    }
-    </STYLE>
-    <TABLE>
-    <TR>
-        <TD style="font-weight: bold; color: black;">&nbsp;<BR>SQL query:</TD>
-        <TD style="text-align: center;">
-            Query history<BR>
-            <BUTTON id="last_btn" title="last query used">&laquo;</BUTTON>
-            <BUTTON id="next_btn" title="next query used">&raquo;</BUTTON>
-        </TD>
-         <TD style="text-align: right" title ="Select to recall full query text">Saved queries<BR>
-            <SELECT id="qlist">
-                <OPTION value="-1">-- New query --</OPTION>
-                <OPTION value="0"></OPTION>
-            </SELECT>
-        </TD>
-    </TR><TR> 
-        <TD colspan="3"><TEXTAREA name="query" id="query" rows="5" cols="80" title="Enter a valid SQL query">%s</TEXTAREA></TD>
-    </TR><TR>
-        <TD style="text-align: right;" colspan="3">Records:
-            &nbsp;from&nbsp;<INPUT type="text" size="3" id="rec_from" value="1"> 
-            &nbsp;to&nbsp;<INPUT type="text" size="3" id="rec_to"> 
-            &nbsp;by&nbsp;<INPUT type="text" size="1" id="rec_by" value="10"> 
-            &nbsp;total&nbsp;<INPUT type="text" size="4" id="rec_total"> 
-            &nbsp;
-            <BUTTON id="last_rs" title="Previous set of records">&laquo;</BUTTON>
-            <BUTTON id="next_rs" title="Next set of records">&raquo;</BUTTON>
-        </TD>
-    </TR><TR> 
-        <TD style="width: 200px"><BUTTON id="OK_btn" title="Executes this query">OK</BUTTON></TD>
-        <TD>&nbsp;</TD>
-        <TD style="text-align: right" >
-            Query <BUTTON id="save_btn" title="saves this query">save</BUTTON>
-            <BUTTON id="del_btn" title="deletes this query if it is saved">delete</BUTTON>
-        </TD>
-    </TR>    
-    </TABLE>  
-    <DIV id="ajax_reply"></DIV>
-    """
-    # set page header
-    jslib = "<SCRIPT src='js/queryTool.js'></SCRIPT>"
-    html = HTML_header("Trasepad Query Tool", extras=jslib)
-    # page body text - populate text area with POST'ed content
-    default_text = "SELECT table_name AS tbl, column_name AS col, data_type AS typ FROM information_schema.columns WHERE table_schema ='f500'"
-    html += template % default_text
-    # create page footer
-    html += HTML_footer()
-    return html
-    
 
 def logTempUser(sid, ip):
     """
@@ -453,7 +406,9 @@ def getCursor():
     return cur    
    
 def session_id():
-# return 16-char random session id, method after stackoverflow.com q# 2257441
+    # return unique 16-char random session id
+    # basic method after stackoverflow.com q# 2257441
+    # elaborated to ensure unique ID
     chars="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz"
     # make random draw of 16 characters
     qry = getCursor()
@@ -559,10 +514,7 @@ def SCTN_sys(sid, environ):
     html = HTML_header("SCTN Meta-database Tool", extras=jslib)
     debug = ""
     # get post data 
-    contentLength = int(environ.get('CONTENT_LENGTH', 0))
-    requestBody = environ['wsgi.input'].read(contentLength)
-    requestBody = requestBody.decode('utf-8')
-    postFields = cgi.parse_qs(requestBody)
+    postFields = getPostFields(environ)
     # check if platform id set                
     platid = int(postFields.get('platid',['0'])[0])
     if platid>0:
@@ -723,12 +675,7 @@ def SCTN_tool(sid, environ=None):
     """
     # retrieve POST data if applicable
     if environ is not None:
-        #if environ.get('REQUEST_METHOD','') == 'POST':
-        #    raise RuntimeError("Debug of SCTN_Tool")
-        contentLength = int(environ.get('CONTENT_LENGTH', 0))
-        requestBody = environ['wsgi.input'].read(contentLength)
-        requestBody = requestBody.decode('utf-8')
-        postFields = cgi.parse_qs(requestBody)
+        postFields = getPostFields(environ)
     else:
         # no post data 
         postFields = None
@@ -738,7 +685,7 @@ def SCTN_tool(sid, environ=None):
         postFields = {'C1': ['1'],'C3': ['1'],'C5': ['1'],'C6': ['1'],'C8': ['1'],'C10': ['1']}   
     # HTML for debugging info - left blank if none
     debug = ""
-    global scriptnm
+    global scriptnm   # *** this needs to be changed, globals inhibit modularization
     # HTML for the page header
     header = """
     <!DOCTYPE html>
@@ -1006,15 +953,146 @@ def SCTN_tool(sid, environ=None):
     # close off page and return
     html += "</FORM></BODY></HTML>"
     return html
+    
+def f500_main(sid, environ):
+    # landing page for F500 tool, also handles GET/POSTs to m=f500 in URI
+    # get POST data if any and the name of the calling app (dev or exec)
+    postFields = getPostFields(environ)
+   # set default POST values if none given
+    if len(postFields)==0:    
+        # set postFields to some default columns
+        postFields = {'Mode': ['None']}   
+    # HTML for debugging info - left blank if none
+    debug = ""
+    # name of calling script (exec or dev)
+    scriptnm =  environ['SCRIPT_NAME']  
+    # HTML for the page header - always visible
+    header = """
+    <!DOCTYPE html>
+    <HTML>
+    <HEAD>
+    <TITLE>Trasepad : Forest 500 data</TITLE>
+    <LINK href="https://www.gc-dz.com/css/f500.css" rel="stylesheet"  type="text/css">
+    <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
+    <SCRIPT src="https://www.gc-dz.com/js/f500.js"></SCRIPT>
+    <META name="viewport" content="width=device-width, initial-scale=1.0">
+    <META charset="UTF-8">
+    </HEAD>
+    <BODY onload="init()">
+    <A name=Top id=Top></A>
+    <!-- page heading organized as a table -->
+    <TABLE><TR>
+        <TD class=narrow><IMG src="https://www.gc-dz.com/img/gc.jpg" border=0 height=48px width=182px></TD>
+        <TD align=left ><H1>Forest 500 Companies and Assessments</H1></TD>
+    </TR> 
+    </TABLE>   
+    <HR style="border-width: 5px; width: 1000px; margin-left: 0;">
+    """
+    html = header
+    # Select rest of page layout depending on last Mode value 
+    mode = postFields['Mode'][0]
+    if mode=="None":
+        # first entry to the page (no 'Mode' POSTed) - display company selection tool
+        # this works via ajax.  See ajaxHandler(), f500_ajax()
+        html += """
+        <FORM action="%(SCRIPT)s?m=f500&u=%(SID)s" method=POST>
+        <INPUT type=hidden name=Mode value='Company'>
+        <INPUT type=hidden id=scriptnm value=%(SCRIPT)s>
+        <INPUT type=hidden id=session-id value=%(SID)s>
+        <INPUT type=hidden name=coid id=coid value=0>
+        <TABLE class=colist><TR>
+        <TD id=cofind class=cofind>
+        Company name:<BR>
+        <INPUT type=text id=cofind-text onkeyup='updateColist()'>
+        <BR>Type at least three letters from any part of
+        the company name that uniquely identifies it.  
+        Regular Expressions can be used for variable
+         text.<BR>&nbsp;<BR>
+         Select the required company from the list to see further details.
+        </TD><TD id=colist>
+        &nbsp;
+        </TD></TR></TABLE>
+        """ % {'SCRIPT': scriptnm, 'SID': sid}
+    elif mode=="Company":
+        # first retrieve required detail from 'companies' table
+        coid = postFields['coid'][0]
+        qry = getCursor()
+        qry.execute("SELECT * FROM f500.companies WHERE coid=%s", (coid,))
+        # check coid is OK.  If no record retrieved dispay warning, otherwise show form with details
+        if qry.rowcount != 1:
+            html += """<P> class=error>Database error: Company ID %s returned %s records from Companies table</P>
+                <BR><INPUT type=button onclick="window.history.back()" value="Cancel">
+                """ % (coid, qry.rowcount)
+        else:
+            co = qry.fetchone()
+            role = 'Finance' if co['cocat']=='FI' else co['codetails']
+            # add section for company header form to HTML page
+            html += """
+            <FORM action="%(SCRIPT)s?m=f500&u=%(SID)s" method=POST>
+            <INPUT type=hidden name=Mode value='CoUpdate'>
+            <H2>%(CONAME)s</H2>
+            <TABLE class=cohdr>
+                <TR>
+                    <TH>Group</TH>
+                    <TH>Subsidiary</TH>
+                    <TH>Jurisdiction</TH>
+                    <TH>Role/Activities</TH>
+                </TR> 
+                <TR>
+                    <TD><INPUT type=text name=cogroup value="%(GROUP)s"></TD>
+                    <TD><INPUT type=text name=cosub value="%(SUB)s"></TD>
+                    <TD><INPUT type=text name=cojur value="%(JUR)s"></TD>
+                    <TD><INPUT type=text name=corol value="%(ROLE)s"></TD>
+                </TR> 
+            </TABLE>
+            """ % {'SCRIPT': scriptnm, 'SID': sid, 'CONAME': co['cogroup'], 'GROUP': co['cogroup'],
+                    'SUB': co['cosubsid'], 'JUR': co['cohq'], 'ROLE': role}
+    #                <TH>Co.ID</TH>
+    #                <TH>File ID</TH>
+    #                <TD><INPUT type=text name=coid value="%(COID)s></TD>
+    #                <TD><INPUT type=text name=flid value="%(FLID)s></TD>
+
+    # ---- debugging information - list of POST fields ------
+    debug += "POST fields:<BR>"
+    # trap sensibly any errors loopong through list of lists
+    try:
+        # list of POST fields
+        for field in postFields.keys():
+            # each field is represented as a list of 1 or more items
+            for f in postFields[field]:
+                debug += '%s = %s<BR>' % (field, f) 
+    except Exception as e:
+        # if error occurs in above, just show traceback
+        debug += traceback.format_exc()
+    # -------------------------------------------------------
+    html += HTML_footer(debug, environ)
+    return html
+    
+def f500_cofind(sid, cofind):
+    # simple search of 'companies' for a matching string
+    qry = getCursor()
+    qry.execute("SELECT coid, cosubsid, coyear FROM f500.companies WHERE cosubsid ~* %s ORDER BY 2, 3", (cofind,))
+    # only show first m, or all if less than m matches
+    m = 20
+    if qry.rowcount>m:
+        flds = qry.fetchmany(m)
+    elif qry.rowcount>0:
+        flds = qry.fetchall()
+    else:
+        html = "<P>[No matches found]</P>"
+        return html
+    # list companies found  
+    html = "<UL>"  
+    for co in flds:
+        html += "<LI class=colink onclick='fetchCompany(%s)'>%s [%s]" % (co['coid'], co['cosubsid'], co['coyear'])
+    html += "</UL>"  
+    return html        
 
 def cmatch_tool(sid, environ):
     # implements company listing and name matching tools
     # the code is borrowed and adapted from SCTN tool, it shares similar style and mode of action
     # get POST data if any and the name of the calling app (dev or exec)
-    contentLength = int(environ.get('CONTENT_LENGTH', 0))
-    requestBody = environ['wsgi.input'].read(contentLength)
-    requestBody = requestBody.decode('utf-8')
-    postFields = cgi.parse_qs(requestBody)
+    postFields = getPostFields(environ)
     # set default POST values if none given
     if len(postFields)==0:    
         # set postFields to some default columns
@@ -1029,7 +1107,7 @@ def cmatch_tool(sid, environ):
     <HTML>
     <HEAD>
     <TITLE>Trasepad : Company Name Matching, Selection and Listing Tools</TITLE>
-    <LINK href="https://www.gc-dz.com/cmatch.css" rel="stylesheet"  type="text/css">
+    <LINK href="https://www.gc-dz.com/css/cmatch.css" rel="stylesheet"  type="text/css">
     <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
     <SCRIPT src="https://www.gc-dz.com/js/cmatch.js"></SCRIPT>
     <META name="viewport" content="width=device-width, initial-scale=1.0">
