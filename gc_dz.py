@@ -243,6 +243,7 @@ def user_login(emailaddr, ip):
         if any_email.match(emailaddr) is None:
             # bold red message if not in email format
             html='<P style="font-weight: bold; color: red">Please enter a valid email address!</P>'
+            return html
         elif gc_email.match(emailaddr) is None:
             # see if this looks like a valid email address with either GC or SEI domain
             html="""<P style="font-weight: bold; color: red"> Only GC and SEI staff or 
@@ -251,50 +252,50 @@ def user_login(emailaddr, ip):
             email your details and justification for access to the Global Canopy Data Manager 
             (<A href="mailto:d.alder@globalcanopy.org" target = _blank>d.alder@globalcanopy.org</A>).</P>
             """
+            return html
         else:
-            html="""<P style="font-weight: bold; color: red">This email has not been
-            registered for access to this portal.</P>  
-            <P>Please contact the Global Canopy Data Manager 
-            (<A href="mailto:d.alder@globalcanopy.org" target = _blank>d.alder@globalcanopy.org</A>)
-            with your name and email, requesting access to this site.</P>  
-            """  
-    else:   
-        # close any open sessions for this user
-        flds = qry.fetchone()
-        userid = flds['userid']
-        qry.execute("UPDATE gcdz.logins SET timeout=NOW() WHERE userid=%(USERID)s AND timeout IS NULL",
-            {'USERID': userid}) 
-        # get new session ID
-        sid = session_id()
-        # create login record
-        qry.execute("INSERT INTO gcdz.logins (userid, sessionid, timeon, ipaddr) VALUES (%(USERID)s, %(SID)s, NOW(), %(IP)s)",
-            {'USERID': userid, 'SID': sid, 'IP': ip}) 
-        if qry.rowcount!=1:
-            raise RuntimeError("Insert failed : %s" % qry.query)  
-        qry.connection.commit()      
-        # provide menu link and session ID by email
-        mail_from = "noreply@gc-dz.com"    
-        mail_to = emailaddr
-        subject = "Login link for gc-dz.com"
-        text ="""
-        Please use the link below to access the Global Canopy Data portal.
-        
-        https://www.gc-dz.com/exec?m=menu&u=%s
-        
-        This link is only valid from this location and expires in 48 hours.
-        Use the login page to generate a new link as necessary.  
-        You will automatically be referred there if the link is invalid.  
-        Please contact me if any queries or problems.  
-        
-        Denis Alder
-        Data Manager, Global Canopy
-        d.alder@globalcanopy.org 
-        """ % sid
-        sendMail(mail_from, mail_to, subject, text)
-        # return text for home page
-        html="""<P>An email has been sent to %s with a link to portal.  Please use this link 
-        to enter the site.  It will expire in 48 hours and will only work from this location.</P>  
-        """  % emailaddr
+            # valid SE/GC email but not yet in users table - add them
+            username = emailaddr.split("@")[0]
+            # get next vailable userid
+            qry.execute("SELECT max(userid) +1 as nextid FROM gcdz.users");
+            nextid = qry.fetchone()['nextid']
+            qry.execute("INSERT INTO gcdz.users (userid, username, email, permit) VALUES(%s, %s, %s, 3)" , (nextid, username, emailaddr))
+    # close any open sessions for this user
+    flds = qry.fetchone()
+    userid = flds['userid']
+    qry.execute("UPDATE gcdz.logins SET timeout=NOW() WHERE userid=%(USERID)s AND timeout IS NULL",
+        {'USERID': userid}) 
+    # get new session ID
+    sid = session_id()
+    # create login record
+    qry.execute("INSERT INTO gcdz.logins (userid, sessionid, timeon, ipaddr) VALUES (%(USERID)s, %(SID)s, NOW(), %(IP)s)",
+        {'USERID': userid, 'SID': sid, 'IP': ip}) 
+    if qry.rowcount!=1:
+        raise RuntimeError("Insert failed : %s" % qry.query)  
+    qry.connection.commit()      
+    # provide menu link and session ID by email
+    mail_from = "noreply@gc-dz.com"    
+    mail_to = emailaddr
+    subject = "Login link for gc-dz.com"
+    text ="""
+    Please use the link below to access the Global Canopy Data portal.
+    
+    https://www.gc-dz.com/exec?m=menu&u=%s
+    
+    This link is only valid from this location and expires in 48 hours.
+    Use the login page to generate a new link as necessary.  
+    You will automatically be referred there if the link is invalid.  
+    Please contact me if any queries or problems.  
+    
+    Denis Alder
+    Data Manager, Global Canopy
+    d.alder@globalcanopy.org 
+    """ % sid
+    sendMail(mail_from, mail_to, subject, text)
+    # return text for home page
+    html="""<P>An email has been sent to %s with a link to portal.  Please use this link 
+    to enter the site.  It will expire in 48 hours and will only work from this location.</P>  
+    """  % emailaddr
     # return text for home page 'reply_div' 
     return html
     
