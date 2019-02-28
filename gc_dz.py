@@ -27,6 +27,7 @@ import cgi, traceback, json
 import os, sys, re, datetime
 import random, string
 from urllib.parse import urlparse
+import unidecode
 
 # Python modules for the email system and encryption
 from smtplib import SMTP
@@ -1004,7 +1005,7 @@ def f500_main(sid, environ):
         <TABLE class=colist><TR>
         <TD id=cofind class=cofind>
         Company name:<BR>
-        <INPUT type=text id=cofind-text onkeyup='updateColist()'>
+        <INPUT type=text id=cofind-text onkeyup='updateColist()' onclick='updateColist()'>
         <BR>Type at least three letters from any part of
         the company name that uniquely identifies it.  
         Regular Expressions can be used for variable
@@ -1020,39 +1021,40 @@ def f500_main(sid, environ):
         qry = getCursor()
         qry.execute("SELECT * FROM f500.companies WHERE coid=%s", (coid,))
         # check coid is OK.  If no record retrieved dispay warning, otherwise show form with details
-        if qry.rowcount != 1:
-            html += """<P> class=error>Database error: Company ID %s returned %s records from Companies table</P>
+        if qry.rowcount == 0:
+            html += """<P class=error>No company selected!</P>
+                <BR><INPUT type=button onclick="window.history.back()" value="Cancel">
+                """
+        elif qry.rowcount > 1:
+            html += """<P class=error>Database error: Company ID %s returned %s records from Companies table</P>
                 <BR><INPUT type=button onclick="window.history.back()" value="Cancel">
                 """ % (coid, qry.rowcount)
         else:
             co = qry.fetchone()
-            role = 'Finance' if co['cocat']=='FI' else co['codetails']
+            role = 'Financial Institution' if co['cocat']=='FI' else co['codetails']
             # add section for company header form to HTML page
             html += """
             <FORM action="%(SCRIPT)s?m=f500&u=%(SID)s" method=POST>
             <INPUT type=hidden name=Mode value='CoUpdate'>
             <H2>%(CONAME)s</H2>
-            <TABLE class=cohdr>
-                <TR>
-                    <TH>Group</TH>
-                    <TH>Subsidiary</TH>
-                    <TH>Jurisdiction</TH>
-                    <TH>Role/Activities</TH>
-                </TR> 
-                <TR>
-                    <TD><INPUT type=text name=cogroup value="%(GROUP)s"></TD>
-                    <TD><INPUT type=text name=cosub value="%(SUB)s"></TD>
-                    <TD><INPUT type=text name=cojur value="%(JUR)s"></TD>
-                    <TD><INPUT type=text name=corol value="%(ROLE)s"></TD>
-                </TR> 
-            </TABLE>
-            """ % {'SCRIPT': scriptnm, 'SID': sid, 'CONAME': co['cogroup'], 'GROUP': co['cogroup'],
-                    'SUB': co['cosubsid'], 'JUR': co['cohq'], 'ROLE': role}
-    #                <TH>Co.ID</TH>
-    #                <TH>File ID</TH>
-    #                <TD><INPUT type=text name=coid value="%(COID)s></TD>
-    #                <TD><INPUT type=text name=flid value="%(FLID)s></TD>
-
+            <INPUT type=button onclick="window.history.back()" value="Back to list">
+            <BR clear=all>
+            """ % {'SCRIPT': scriptnm, 'SID': sid, 'CONAME': co['cogroup']}
+            # test of floating datafield
+            html += "<BR>"
+            html += HTML_datafield("Group", "cogroup", co['cogroup'])
+            html += HTML_datafield("Subsidiary", "cosub", co['cosubsid'])
+            html += HTML_datafield("HQ", "cojur", co['cohq'])
+            html += HTML_datafield("Role/Activities", "corol", role)
+            html += "<BR clear=all>"
+            html += HTML_xlco_search(co['cosubsid'])
+            html += "</FORM>"
+            debug += '%s = %s<BR>' % ('Name fragments', str(name_frags(co['cosubsid'])))
+         
+            # get a dictionary of years and file IDs eg, {'2014':30, '2015': 401} etc        
+            #yrass = assFinder([co['cogroup'], co['cosubsid']])
+            # create HTML for this
+            
     # ---- debugging information - list of POST fields ------
     debug += "POST fields:<BR>"
     # trap sensibly any errors loopong through list of lists
@@ -1067,6 +1069,90 @@ def f500_main(sid, environ):
         debug += traceback.format_exc()
     # -------------------------------------------------------
     html += HTML_footer(debug, environ)
+    return html
+
+def HTML_xlco_search(coname):
+    # search for a name from the 'Companies' list and returns matching files from the 'xlcohdr' table
+    # in an HTML format as part of a form, together with assessment years
+    # (1) tokenise 'coname' into a sequence of name fragments
+    cofrags = name_frags(coname)
+    # (2) retrieve xlcohdr table
+    qry = getCursor()
+    qry.execute("""SELECT x.flid, x.coname, f.flname, d.cotype, d.ayear FROM f500.xlcohdr AS x 
+        INNER JOIN f500.filelist AS f ON x.flid=f.flid
+        INNER JOIN f500.dirtree AS d ON d.dtid=f.dtid ORDER BY 1""")
+    # convert query results into a list
+    colist = qry.fetchall()
+    # initialise the list of matches
+    comatch = []
+    # scan the list of names looking for matches
+    for co in colist:
+        # convert company name in list into fragments
+        xfrags = name_frags(co['coname'])
+        # if the names are 'equivalent', add the details to the list of matches
+        if name_frags_equiv(cofrags, xfrags):
+            comatch.append(co)
+    # create an HTML table with the data
+    # --- this will be enhanced later ---
+    html = "<TABLE class=cohdr><TR><TH>Year</TH><TH>Company Name</TH><TH>File ID</TH><TH>File</TH></TR>"
+    for co in comatch:
+        html += "<TR><TD>%s</TD><TD>%s</TD><TD>%s</TD><TD>%s</TD></TR>" \
+            % (co['ayear'], co['coname'], co['flid'], co['flname'])
+    # finish off table
+    html += "</TABLE>"
+    return html        
+
+def name_frags(name):
+    # splits a name into standardised fragments and returns them as a sequence
+    nm = name.lower()                           # convert to lower case
+    nm = re.sub('\.xls[x|m]\s*$','', nm)        # remove .xlsx or .xlsm at end of string
+    nm = unidecode.unidecode(nm)                # clean up accented characters
+    nm = re.sub('[^\sa-z]', ' ', nm)             # remove anything else that is not a letter, whitespace or hyphen  
+    nm = re.sub(r'(?<![a-z])([a-z])\s(?![a-z]{2})', r'\1', nm)     # merge any single letters together
+    #list of words that are to be removed
+    stopwords = ['ltd', 'co', 'group', 'sa', 'inc', '&', 'holdings', 'and', 'corp', 'pt', 'international', 'de', \
+                'the', 'corporation', 'y', 'plc', 'of', 'limited', 'grupo', 'ag', 'as', 'j', 'ooo', 'company', 'holding', 'i', 'gmbh']
+    for sw in stopwords:
+        rgx = "(^|[ ])%s($|[ ])" % sw           
+        nm = re.sub(rgx,' ', nm)                # filter out unwanted words 
+    nm = re.split('\s+', nm)                    # split at word boundaries
+    return nm
+
+def name_frags_equiv(frags1, frags2):
+    # returns True if the two lists share tokens in the same order
+    # if there is more than 1 token, than 1 less than the total can match
+    # to give equivalence.  If only one, it must match
+    if len(frags1)> len(frags2):
+        #always have frags 1 as the shorter of the two if they differ
+        frags2, frags1 = frags1, frags2
+    hits = 0    
+    for i in range(len(frags2)):       
+        for j in range(i, len(frags1)):
+            if frags1[i]==frags2[j]:
+                # token in frags1 matches that in frags2, so count it and exit inner loop
+                hits += 1
+                break
+    # equivalence is 1 hit if shorter has 1 word, 2 if 2-3 words, 3 if 4 or more
+    #equiv = False
+    #if len(frags1)==1:
+    #    equiv = hits >= 1
+    #elif len(frags1)<=3:
+    #    equiv = hits >= 2
+    #elif len(frags1)>3:
+    #    equiv = hits >= 3
+    equiv = hits == len(frags1)
+    return equiv    
+
+def HTML_datafield(hdr, name, text, minsize=10, pxc=1):
+    # returns a floating DIV with heading text 'hdr' and input field 'name' with value 'text'
+    # size is estimated dynamically as larger of hdr, text, minsize, assuming 'pxc' per char
+    sz = max(len(hdr), len(text), minsize)* pxc
+    html = """
+    <DIV class=datafield style="width: %(WIDTH)sch">
+    <P>%(HDR)s</P>
+    <INPUT type=text name=%(NAME)s value="%(TEXT)s">
+    </DIV>
+    """ % {'WIDTH': sz, 'HDR': hdr, 'NAME': name, 'TEXT': text}
     return html
     
 def f500_cofind(sid, cofind):
@@ -1088,6 +1174,10 @@ def f500_cofind(sid, cofind):
         html += "<LI class=colink onclick='fetchCompany(%s)'>%s [%s]" % (co['coid'], co['cosubsid'], co['coyear'])
     html += "</UL>"  
     return html        
+
+def yrass(names):
+    # get a dictionary of years and file IDs eg, {'2014':30, '2015': 401} etc        
+    pass
 
 def cmatch_tool(sid, environ):
     # implements company listing and name matching tools
@@ -1152,7 +1242,7 @@ def cmatch_tool(sid, environ):
                 ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
                 """, {'SID': sid, 'DD': json.dumps(dd)}) 
             # get list of names to check, method, and output format
-            nmlist =  re.split('\r\n', dd['CLIST'])
+            nmlist =  re.split(r'\r\n', dd['CLIST'])
             chktype =  postFields['search_opt'][0]
             outfmt =  postFields['output_opt'][0]
             # results of name check are returned as HTML
@@ -1228,6 +1318,9 @@ def nameCheck(nmlist, chktype, outfmt):
                 <TR><TD class=tflh>Type</TD><TD class=tflh>ID</TD></TR>
                 """ 
     for nm in nmlist:
+        #skip any names that are not words 
+        if re.search('\w+', nm) is None:
+            continue
         matches = api.match(nm, threshold=0.9, balance=0.5)
         if len(matches) == 0:
             # no match found
@@ -1240,6 +1333,8 @@ def nameCheck(nmlist, chktype, outfmt):
             n=0
             for item in matches:
                 # new row if more than first match
+                #html += "<TD colspan=5><PRE>%s</PRE></TD></TR>" % ('match' in item)   
+                #continue        
                 co = item['match']
                 if n>0:
                     html += "<TR>"
