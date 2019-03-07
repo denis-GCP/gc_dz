@@ -1,5 +1,5 @@
 """
- ------------- gc_dz.py version 0.11 Feb 2019 ------------
+ ------------- gc_dz.py version 0.12 Mar 2019 ------------
  This module handles all the server-side active content for the gc-dz.com 
  website.  It is called using the WSGI interface via the gc-dz.com/exec alias.  
  The entry point for /exec calls is the application() function.  This returns
@@ -19,6 +19,7 @@
 # v 0.09 11 Feb 2019  Permit system finalised, landing page for F500
 # v 0.10 18 Feb 2019  Trase/Neural Alpha name matching tools implemented
 # v 0.11 22 Feb 2019  Forest 500 company listing/selection
+# v 0.12 05 Mar 2019  Consolidate work so far of f500_ defs
 # ------------------------
  
 # CGI interface functions for Python
@@ -1282,11 +1283,77 @@ def cmatch_tool(sid, environ):
     elif mode=="Filter":
         pass
     elif mode=="List":
-        pass    
-    html +=""
+        # segment of html for company listing tool
+        # set default data values for controls
+        dd = {'AYEAR': '0', 'COTYPE': ''}    
+        # check if the 'GO' button has been clicked, and if so replace defaults with passed data
+        if postFields.get('Update',[''])[0] == 'Update':    
+            # save current settings as default values
+            dd['AYEAR'] = postFields.get('ayear', [''])[0]
+            dd['COTYPE'] = postFields.get('cotype', [''])[0] 
+            qry.execute("""INSERT INTO gcdz.def_data (sessionid, ddtag, ddinfo) VALUES (%(SID)s, 'clist', %(DD)s)   
+                ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
+                """, {'SID': sid, 'DD': json.dumps(dd)}) 
+            # create HTML table for output list
+            # construct WHERE clause based on options
+            where = ''
+            if dd['AYEAR']>'0' : where += " d.ayear = %s " % dd['AYEAR']
+            if dd['AYEAR']>'0' and dd['COTYPE']>'': where += " AND "
+            if dd['COTYPE']>'': where += " d.cotype = '%s' " % dd['COTYPE']
+            if where>'':
+                where = " WHERE " + where
+            # main query text
+            query = """SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
+                INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
+                %s ORDER BY d.cotype, x.coname, d.ayear """ % where
+            # get company details
+            qry.execute(query)
+            # create table headings
+            tbl = """<TABLE class=company-list><TR>
+                <TH style="width: 50px">Type</TH>
+                <TH style="width: 50px">Year</TH>
+                <TH style="width: 250px">Company Name</TH>
+                <TH style="width: 50px">File ID</TH>
+                <TH style="width: 350px">Filename</TH>
+                <TH style="width: 100px">Last Update</TH>
+                </TR>"""
+            # create table body
+            for row in qry:
+                tbl += "<TR onclick='getCoAss(%s)'>" % row['flid']
+                for col in row:
+                    tbl += "<TD>%s</TD>" % col
+                tbl += "</TR>"
+            tbl += "</TABLE>"          
+        else:    
+            # no list to display yet
+            tbl = "<P><SMALL>Make a selection from the drop down lists and click <B>Update</B> to see the company list...</SMALL></P>"
+        # retrieve default values if GO was not clicked (as on first entry to this tool)
+        qry.execute("SELECT sessionid AS sid, ddtag, ddinfo FROM gcdz.def_data WHERE sessionid=%s AND ddtag='clist'", (sid,))
+        # defaults found, retrieve them to local variables
+        if qry.rowcount>0:
+            flds = qry.fetchone()
+            dd = flds['ddinfo']
+        # HTML for form heading       
+        html += """
+        <FORM action="%(APP)s?m=cmatch&u=%(SID)s" method=POST>
+        <INPUT type="hidden" name="Mode" value="List">
+        <H3>List of companies and financial institutions in Forest 500</H3>
+        """ % {'APP': scriptnm, 'SID': sid}
+        # year selector
+        debug += "\ndd = %s\n" % str(dd)
+        qry.execute("select distinct ayear::text, ayear from f500.dirtree union select ' All', 0 order by 1")
+        html += HTML_select("Year", 10, "ayear", qry, dflt=int(dd['AYEAR']));
+        # company type selector
+        qry.execute("select unnest(array['Supply Chain Company', 'Financial Institution', 'All']),unnest(array['CO', 'FI', ''])")
+        html += HTML_select("Company Type", 30, "cotype", qry, dflt=dd['COTYPE']);
+        # update button
+        html += '<INPUT type="submit" name="Update" id="update" value="Update">'
+        html += "<BR clear=all>"
+        html += tbl
+        html += "</FORM>"
     # ---- debugging information - list of POST fields ------
     debug += "POST fields:<BR>"
-    # trap sensibly any errors loopong through list of lists
+    # trap sensibly any errors looping through list of lists
     try:
         # list of POST fields
         for field in postFields.keys():
@@ -1300,6 +1367,30 @@ def cmatch_tool(sid, environ):
     html += HTML_footer(debug, environ)
     return html
 
+def HTML_select(hdr, sz, name, qry, dflt='', onchg=False):
+# returns HTML for a SELECT dropdown.  'name' is the HTML name tag, qry is a cursor object with at least two fields,
+# representing labels and values for the SELECT options. if onchg is is true, a function called sel_onchg('name') is called.
+# The ID of the SELECT will be id+'name', which can be referenced in the sel_onchg() function.  The default option whose
+# label is 'dflt' is check.  'hdr' and 'sz' are a heading for the drop down and size in monospaced characters.
+    try:
+        onchg_txt = """onchange='sel_onchg("%s")'""" % name if onchg else ''
+        html = """
+        <DIV class=datafield style="width: %(WIDTH)sch">
+        <P>%(HDR)s</P>
+        <SELECT name=%(NAME)s id=id%(NAME)s %(ONCHG)s>
+        """  % {'HDR': hdr, 'WIDTH': sz, 'NAME': name, 'ONCHG': onchg_txt}
+        for opt in qry:
+            selct = 'selected' if opt[1]==dflt else ''
+            html += "<OPTION value='%s' %s>%s</option>" % (opt[1], selct, opt[0])
+        html += "</SELECT></DIV>"    
+    except Exception as e:
+        # if error occurs in above show traceback + debug info       
+        html = "<PRE>\n"
+        html += "opt = %s\n\n" % str(opt)
+        html += traceback.format_exc()
+        html += "</PRE>"
+    return html
+    
 def nameCheck(nmlist, chktype, outfmt):
 # undertakes a name search and returns information on any matches in HTML format
 # nmlist - a list of names to be checked
