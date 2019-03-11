@@ -132,7 +132,7 @@ def page_selector(environ):
         html = mainMenu(sid, environ, pflag)     
     elif mdl == 'cmatch':
         # company lists and name matching
-        html = cmatch_tool(sid, environ)     
+        html = cmatch_tool(mdl, sid, environ)     
     elif mdl == 'f500':
         # company lists and name matching
         html = f500_main(sid, environ)     
@@ -161,10 +161,8 @@ def mainMenu(sid, environ, pflag):
         raise RuntimeError("Menu system not found!!" )
     # make template for link URL    
     t_url = '%s://%s/%s?m=%%s&u=%%s' % (environ['REQUEST_SCHEME'], environ['SERVER_NAME'],environ['SCRIPT_NAME']) 
-    # style for disabled rows
-    styles = "<STYLE>li.gray {color: gray; }</STYLE>"
     # create HTML page
-    html = HTML_header("Trasepad Menu", styles)
+    html = HTML_header(title="Trasepad Menu", css="f500")
     rows = qry.fetchall()     
     # create list of menu items as links, which are disabled if permit not valid
     html += "<UL>"
@@ -174,7 +172,7 @@ def mainMenu(sid, environ, pflag):
         # check if permit flag matches user
         if (row['permitflag'] & pflag) or row['permitflag']==0:
             # write line of HTML with link
-            html += "<LI><A href='%s'>%s</A>" % (url, row['menutext'])
+            html += "<LI><A class=menu href='%s'>%s</A>" % (url, row['menutext'])
         else:
             html += "<LI class='gray'>%s" % row['menutext']
      # end list and do page footer   
@@ -295,7 +293,8 @@ def user_login(emailaddr, ip):
     """ % sid
     sendMail(mail_from, mail_to, subject, text)
     # return text for home page
-    html="""<P>An email has been sent to %s with a link to portal.  Please use this link 
+    html="""<P><SPAN style="color: green; font-weight: bold;">
+    An email has been sent to %s with a link to the portal.</SPAN>  Please use this link 
     to enter the site.  It will expire in 48 hours and will only work from this location.</P>  
     """  % emailaddr
     # return text for home page 'reply_div' 
@@ -361,15 +360,6 @@ def logTempUser(sid, ip):
         raise RuntimeError("Insert failed : %s" % qry.query)  
     qry.connection.commit()
     return sid      
-    
-def normal_reply(title, msg):
-    template = "<p>%s</p>"   
-    # substitute variable text in page template
-    html = HTML_header(title)
-    html += (template % msg)
-    html += HTML_footer()
-    # return HTML for page
-    return html
     
 def error_page(msg, lgin=0):
     # returns HTML for an error page, with message 'msg' in red bold
@@ -514,7 +504,7 @@ def SCTN_sys(sid, environ):
     <SCRIPT src='js/sctn.js'></SCRIPT>
     <SCRIPT src='js/cookies.js'></SCRIPT>
     """
-    html = HTML_header("SCTN Meta-database Tool", extras=jslib)
+    html = HTML_header(title="SCTN Meta-database Tool", extras=jslib)
     debug = ""
     # get post data 
     postFields = getPostFields(environ)
@@ -969,93 +959,83 @@ def f500_main(sid, environ):
     debug = ""
     # name of calling script (exec or dev)
     scriptnm =  environ['SCRIPT_NAME']  
-    # HTML for the page header - always visible
-    header = """
-    <!DOCTYPE html>
-    <HTML>
-    <HEAD>
-    <TITLE>Trasepad : Forest 500 data</TITLE>
-    <LINK href="https://www.gc-dz.com/css/f500.css" rel="stylesheet"  type="text/css">
-    <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
-    <SCRIPT src="https://www.gc-dz.com/js/f500.js"></SCRIPT>
-    <META name="viewport" content="width=device-width, initial-scale=1.0">
-    <META charset="UTF-8">
-    </HEAD>
-    <BODY onload="init()">
-    <A name=Top id=Top></A>
-    <!-- page heading organized as a table -->
-    <TABLE><TR>
-        <TD class=narrow><IMG src="https://www.gc-dz.com/img/gc.jpg" border=0 height=48px width=182px></TD>
-        <TD align=left ><H1>Forest 500 Companies and Assessments</H1></TD>
-    </TR> 
-    </TABLE>   
-    <HR style="border-width: 5px; width: 1000px; margin-left: 0;">
-    """
-    html = header
-    # Select rest of page layout depending on last Mode value 
-    mode = postFields['Mode'][0]
-    if mode=="None":
-        # first entry to the page (no 'Mode' POSTed) - display company selection tool
-        # this works via ajax.  See ajaxHandler(), f500_ajax()
-        html += """
-        <FORM action="%(SCRIPT)s?m=f500&u=%(SID)s" method=POST>
-        <INPUT type=hidden name=Mode value='Company'>
-        <INPUT type=hidden id=scriptnm value=%(SCRIPT)s>
-        <INPUT type=hidden id=session-id value=%(SID)s>
-        <INPUT type=hidden name=coid id=coid value=0>
-        <TABLE class=colist><TR>
-        <TD id=cofind class=cofind>
-        Company name:<BR>
-        <INPUT type=text id=cofind-text onkeyup='updateColist()' onclick='updateColist()'>
-        <BR>Type at least three letters from any part of
-        the company name that uniquely identifies it.  
-        Regular Expressions can be used for variable
-         text.<BR>&nbsp;<BR>
-         Select the required company from the list to see further details.
-        </TD><TD id=colist>
-        &nbsp;
-        </TD></TR></TABLE>
-        """ % {'SCRIPT': scriptnm, 'SID': sid}
-    elif mode=="Company":
-        # first retrieve required detail from 'companies' table
-        coid = postFields['coid'][0]
-        qry = getCursor()
-        qry.execute("SELECT * FROM f500.companies WHERE coid=%s", (coid,))
-        # check coid is OK.  If no record retrieved dispay warning, otherwise show form with details
-        if qry.rowcount == 0:
-            html += """<P class=error>No company selected!</P>
-                <BR><INPUT type=button onclick="window.history.back()" value="Cancel">
-                """
-        elif qry.rowcount > 1:
-            html += """<P class=error>Database error: Company ID %s returned %s records from Companies table</P>
-                <BR><INPUT type=button onclick="window.history.back()" value="Cancel">
-                """ % (coid, qry.rowcount)
-        else:
-            co = qry.fetchone()
-            role = 'Financial Institution' if co['cocat']=='FI' else co['codetails']
-            # add section for company header form to HTML page
-            html += """
-            <FORM action="%(SCRIPT)s?m=f500&u=%(SID)s" method=POST>
-            <INPUT type=hidden name=Mode value='CoUpdate'>
-            <H2>%(CONAME)s</H2>
-            <INPUT type=button onclick="window.history.back()" value="Back to list">
-            <BR clear=all>
-            """ % {'SCRIPT': scriptnm, 'SID': sid, 'CONAME': co['cogroup']}
-            # test of floating datafield
-            html += "<BR>"
-            html += HTML_datafield("Group", "cogroup", co['cogroup'])
-            html += HTML_datafield("Subsidiary", "cosub", co['cosubsid'])
-            html += HTML_datafield("HQ", "cojur", co['cohq'])
-            html += HTML_datafield("Role/Activities", "corol", role)
-            html += "<BR clear=all>"
-            html += HTML_xlco_search(co['cosubsid'])
-            html += "</FORM>"
-            debug += '%s = %s<BR>' % ('Name fragments', str(name_frags(co['cosubsid'])))
-         
-            # get a dictionary of years and file IDs eg, {'2014':30, '2015': 401} etc        
-            #yrass = assFinder([co['cogroup'], co['cosubsid']])
-            # create HTML for this
-            
+    js = '<SCRIPT src="https://www.gc-dz.com/js/f500.js"></SCRIPT>'
+    # heading section of page
+    html = HTML_header(css="f500", extras=js, width=1000, menulink=(sid, scriptnm), module="f500")
+    # get setting of update button (True if clicked, False otherwise)
+    update_btn = postFields.get('Update',[''])[0] == 'Update'
+    # set default data values for controls
+    dd = {'AYEAR': '0', 'COTYPE': '', 'FILTER': ''}   
+    # open database cursor 
+    qry = getCursor()
+    if update_btn:
+        # get control values from POST fields and save then as defaults
+        dd['AYEAR'] = postFields.get('ayear', [''])[0]
+        dd['COTYPE'] = postFields.get('cotype', [''])[0] 
+        dd['FILTER'] = postFields.get('filter', [''])[0] 
+        # save as defaults 
+        qry.execute("""INSERT INTO gcdz.def_data (sessionid, ddtag, ddinfo) VALUES (%(SID)s, 'F500_List', %(DD)s)   
+            ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
+            """, {'SID': sid, 'DD': json.dumps(dd)}) 
+    else:    
+        # retrieve default values if Update button was not clicked
+        qry.execute("SELECT sessionid AS sid, ddtag, ddinfo FROM gcdz.def_data WHERE sessionid=%s AND ddtag='F500_List'", (sid,))
+        # defaults found, retrieve them to local variables
+        if qry.rowcount>0:
+            flds = qry.fetchone()
+            dd = flds['ddinfo']
+    # HTML for form heading       
+    html += """
+        <FORM action="%(APP)s?m=f500&u=%(SID)s" method=POST>
+        <INPUT type="hidden" name="FileID" id="fileid" value=0>
+        """ % {'APP': scriptnm, 'SID': sid}
+    # year selector
+    # debug += "\ndd = %s\n" % str(dd)
+    qry.execute("select distinct ayear::text, ayear from f500.dirtree union select ' All', 0 order by 1")
+    html += HTML_select("Year", 10, "ayear", qry, dflt=int(dd['AYEAR']));
+    # company type selector
+    qry.execute("select unnest(array['Supply Chain Company', 'Financial Institution', 'All']),unnest(array['CO', 'FI', ''])")
+    html += HTML_select("Company Type", 30, "cotype", qry, dflt=dd['COTYPE']);
+    # Filter input selector
+    html += HTML_input("Filter (regex)", 30, "filter", dflt=dd['FILTER']);
+    # update button
+    html += '<INPUT type="submit" name="Update" id="update" value="Update">'
+    html += "<BR clear=all></FORM>"
+    if update_btn:
+        # create HTML table for list of companies
+        # construct WHERE clause based on options
+        where = ''
+        if dd['AYEAR']>'0' : where += " d.ayear = %s " % dd['AYEAR']
+        if dd['AYEAR']>'0' and dd['COTYPE']>'': where += " AND "
+        if dd['COTYPE']>'': where += " d.cotype = '%s' " % dd['COTYPE']
+        if where>'':
+            where = " WHERE " + where
+        # main query text
+        query = """SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
+            INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
+            %s ORDER BY d.cotype, x.coname, d.ayear """ % where
+        # get company details
+        qry.execute(query)
+        # create table headings
+        tbl = """<TABLE class=company-list><TR>
+            <TH style="width: 50px">Type</TH>
+            <TH style="width: 50px">Year</TH>
+            <TH style="width: 250px">Company Name</TH>
+            <TH style="width: 50px">File ID</TH>
+            <TH style="width: 350px">Filename</TH>
+            <TH style="width: 100px">Last Update</TH>
+            </TR>"""
+        # create table body
+        for row in qry:
+            tbl += "<TR onclick='getCoAss(%s)'>" % row['flid']
+            for col in row:
+                tbl += "<TD>%s</TD>" % col
+            tbl += "</TR>"
+        tbl += "</TABLE>"          
+    else:    
+        # no list to display yet
+        tbl = "<P><SMALL>Make a selection from the drop down lists and click <B>Update</B> to see the company list...</SMALL></P>"
+    html += tbl
     # ---- debugging information - list of POST fields ------
     debug += "POST fields:<BR>"
     # trap sensibly any errors loopong through list of lists
@@ -1071,7 +1051,7 @@ def f500_main(sid, environ):
     # -------------------------------------------------------
     html += HTML_footer(debug, environ)
     return html
-
+    
 def HTML_xlco_search(coname):
     # search for a name from the 'Companies' list and returns matching files from the 'xlcohdr' table
     # in an HTML format as part of a form, together with assessment years
@@ -1180,177 +1160,72 @@ def yrass(names):
     # get a dictionary of years and file IDs eg, {'2014':30, '2015': 401} etc        
     pass
 
-def cmatch_tool(sid, environ):
-    # implements company listing and name matching tools
+def cmatch_tool(module, sid, environ):
+    # implements trase Neural alpha name matching tools
     # the code is borrowed and adapted from SCTN tool, it shares similar style and mode of action
     # get POST data if any and the name of the calling app (dev or exec)
     postFields = getPostFields(environ)
     # set default POST values if none given
     if len(postFields)==0:    
         # set postFields to some default columns
-        postFields = {'Mode': ['None']}   
+        postFields = {'Mode': ['None']}  
+    # get a cursor for database queries     
+    qry = getCursor()
     # HTML for debugging info - left blank if none
     debug = ""
     # name of calling script (exec or dev)
     scriptnm =  environ['SCRIPT_NAME']  
-    # HTML for the page header and mode buttons
-    header = """
-    <!DOCTYPE html>
-    <HTML>
-    <HEAD>
-    <TITLE>Trasepad : Company Name Matching, Selection and Listing Tools</TITLE>
-    <LINK href="https://www.gc-dz.com/css/cmatch.css" rel="stylesheet"  type="text/css">
-    <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
-    <SCRIPT src="https://www.gc-dz.com/js/cmatch.js"></SCRIPT>
-    <META name="viewport" content="width=device-width, initial-scale=1.0">
-    <META charset="UTF-8">
-    </HEAD>
-    <BODY onload="init()">
-    <A name=Top id=Top></A>
-    <!-- page heading organized as a table -->
-    <FORM action="%s?m=cmatch&u=%s" method=POST>
-    <TABLE><TR>
-        <TD class=narrow><IMG src="https://www.gc-dz.com/img/gc.jpg" border=0 height=48px width=182px></TD>
-        <TD align=left ><H1>Company Name Matching, Selection and Listing Tools</H1></TD>
-    </TR> 
-    </TABLE>   
-    <HR style="border-width: 5px; width: 1000px; margin-left: 0;">
-    <P>
-    <INPUT type="submit" name="Mode" value="Match">&nbsp;&nbsp;<SMALL>Find matches for full or partial names</SMALL>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-    <INPUT type="submit" name="Mode" value="Filter">&nbsp;&nbsp;<SMALL>Select companies by attribute</SMALL>
-    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-    <INPUT type="submit" name="Mode" value="List">&nbsp;&nbsp;<SMALL>List selection with chosen details</SMALL>
-    </P>
-    </FORM>    
-    """ % (scriptnm, sid)
-    html = header
-    mode = postFields['Mode'][0]
-    qry = getCursor()
-    if mode=="Match":
-        # segment of html for name matching tool
-        # set default data values for controls
-        dd = {'CLIST': '', 'TRASE_CHK': 'checked', 'F500_CHK': '', 'SIMPLE_CHK': 'checked','FULL_CHK': ''}    
-        # check if the 'GO' button has been clicked, and if so replace defaults with passed data
-        if postFields.get('Search',[''])[0] == 'Go':    
-            # save current settings as default values
-            dd['CLIST'] = postFields.get('clist',[''])[0]
-            dd['TRASE_CHK'] = 'checked' if postFields['search_opt'][0] == 'trase' else ''
-            dd['F500_CHK'] = 'checked' if postFields['search_opt'][0] == 'f500' else ''
-            dd['SIMPLE_CHK'] = 'checked' if postFields['output_opt'][0] == 'simple' else ''
-            dd['FULL_CHK'] = 'checked' if postFields['output_opt'][0] == 'full' else ''
-            qry.execute("""INSERT INTO gcdz.def_data (sessionid, ddtag, ddinfo) VALUES (%(SID)s, 'cmatch', %(DD)s)   
-                ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
-                """, {'SID': sid, 'DD': json.dumps(dd)}) 
-            # get list of names to check, method, and output format
-            nmlist =  re.split(r'\r\n', dd['CLIST'])
-            chktype =  postFields['search_opt'][0]
-            outfmt =  postFields['output_opt'][0]
-            # results of name check are returned as HTML
-            html += nameCheck(nmlist, chktype, outfmt)
-        else:             
-            # retrieve default values if GO was not clicked (as on first entry to this tool)
-            qry.execute("SELECT sessionid AS sid, ddtag, ddinfo FROM gcdz.def_data WHERE sessionid=%s AND ddtag='cmatch'", (sid,))
-            # defaults found, retrieve them to local variables
-            if qry.rowcount>0:
-                flds = qry.fetchone()
-                dd = flds['ddinfo']
-            # HTML for displayed form        
-            html += """
-            <FORM action="%(APP)s?m=cmatch&u=%(SID)s" method=POST>
-            <BR>&nbsp;<BR>
-            <TABLE class=match><TR style="vertical-align: top">
-                <TD>
-                    <TEXTAREA rows=14, cols=70 name="clist">%(CLIST)s</TEXTAREA>
-                </TD><TD style="font-size: small; padding-left: 30px;">
-                    Type or paste a list of names or name fragments.  For quick lookup, type a single name and click the GO button.
-                    <BR>&nbsp;<BR>
-                    <U>Method</U><BR>
-                    <INPUT type="radio" value="trase" name="search_opt" %(TRASE_CHK)s>&nbsp;&nbsp;Use trase/Neural Alpha toolkit<BR>
-                    <INPUT type="radio" value="f500" name="search_opt" %(F500_CHK)s>&nbsp;&nbsp;Search F500 companies
-                    <BR>&nbsp;<BR>
-                    <U>Output</U><BR>
-                    <INPUT type="radio" value="simple" name="output_opt" %(SIMPLE_CHK)s>&nbsp;&nbsp;Simple output (1 line per company)<BR>
-                    <INPUT type="radio" value="full" name="output_opt" %(FULL_CHK)s>&nbsp;&nbsp;All available detail (multiline per company)
-                    <BR>&nbsp;<BR>
-                    <INPUT type="submit" name="Search" value="Go">
-                </TD><TD>
-            </TR></TABLE>
-            <INPUT type="hidden" name="Mode" value="Match">
-            </FORM>        
-            """ % {'APP': scriptnm, 'SID': sid, 'CLIST': dd['CLIST'], 'TRASE_CHK': dd['TRASE_CHK'], 'F500_CHK': dd['F500_CHK'], \
-                'SIMPLE_CHK': dd['SIMPLE_CHK'],'FULL_CHK': dd['FULL_CHK']}
-    elif mode=="Filter":
-        pass
-    elif mode=="List":
-        # segment of html for company listing tool
-        # set default data values for controls
-        dd = {'AYEAR': '0', 'COTYPE': ''}    
-        # check if the 'GO' button has been clicked, and if so replace defaults with passed data
-        if postFields.get('Update',[''])[0] == 'Update':    
-            # save current settings as default values
-            dd['AYEAR'] = postFields.get('ayear', [''])[0]
-            dd['COTYPE'] = postFields.get('cotype', [''])[0] 
-            qry.execute("""INSERT INTO gcdz.def_data (sessionid, ddtag, ddinfo) VALUES (%(SID)s, 'clist', %(DD)s)   
-                ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
-                """, {'SID': sid, 'DD': json.dumps(dd)}) 
-            # create HTML table for output list
-            # construct WHERE clause based on options
-            where = ''
-            if dd['AYEAR']>'0' : where += " d.ayear = %s " % dd['AYEAR']
-            if dd['AYEAR']>'0' and dd['COTYPE']>'': where += " AND "
-            if dd['COTYPE']>'': where += " d.cotype = '%s' " % dd['COTYPE']
-            if where>'':
-                where = " WHERE " + where
-            # main query text
-            query = """SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
-                INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
-                %s ORDER BY d.cotype, x.coname, d.ayear """ % where
-            # get company details
-            qry.execute(query)
-            # create table headings
-            tbl = """<TABLE class=company-list><TR>
-                <TH style="width: 50px">Type</TH>
-                <TH style="width: 50px">Year</TH>
-                <TH style="width: 250px">Company Name</TH>
-                <TH style="width: 50px">File ID</TH>
-                <TH style="width: 350px">Filename</TH>
-                <TH style="width: 100px">Last Update</TH>
-                </TR>"""
-            # create table body
-            for row in qry:
-                tbl += "<TR onclick='getCoAss(%s)'>" % row['flid']
-                for col in row:
-                    tbl += "<TD>%s</TD>" % col
-                tbl += "</TR>"
-            tbl += "</TABLE>"          
-        else:    
-            # no list to display yet
-            tbl = "<P><SMALL>Make a selection from the drop down lists and click <B>Update</B> to see the company list...</SMALL></P>"
+    js = '<SCRIPT src="https://www.gc-dz.com/js/cmatch.js"></SCRIPT>'
+    # heading section of page
+    html = HTML_header(css="f500", extras=js, width=1000, menulink=(sid, scriptnm), module=module)
+    # segment of html for text box to paste company list
+    # set default data values for controls
+    dd = {'CLIST': '', 'TRASE_CHK': 'checked', 'INFO_CHK': ''}    
+    # check if the 'GO' button has been clicked, and if so replace defaults with passed data
+    if postFields.get('Search',[''])[0] == 'Go':    
+        # save current settings as default values
+        dd['CLIST'] = postFields.get('clist',[''])[0]
+        dd['TRASE_CHK'] = 'checked' if postFields['search_opt'][0] == 'trase' else ''
+        dd['INFO_CHK'] = 'checked' if postFields['search_opt'][0] == 'info' else ''
+        qry.execute("""INSERT INTO gcdz.def_data (sessionid, ddtag, ddinfo) VALUES (%(SID)s, 'cmatch', %(DD)s)   
+            ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
+            """, {'SID': sid, 'DD': json.dumps(dd)}) 
+        # get list of names to check, method, and output format
+        nmlist =  re.split(r'\r\n', dd['CLIST'])
+        chktype =  postFields['search_opt'][0]
+        # results of name check are returned as HTML
+        html_out = nameCheck(nmlist, chktype)
+    else: 
+        # no output yet
+        html_out = ""            
         # retrieve default values if GO was not clicked (as on first entry to this tool)
-        qry.execute("SELECT sessionid AS sid, ddtag, ddinfo FROM gcdz.def_data WHERE sessionid=%s AND ddtag='clist'", (sid,))
+        qry.execute("SELECT sessionid AS sid, ddtag, ddinfo FROM gcdz.def_data WHERE sessionid=%s AND ddtag='cmatch'", (sid,))
         # defaults found, retrieve them to local variables
         if qry.rowcount>0:
             flds = qry.fetchone()
             dd = flds['ddinfo']
-        # HTML for form heading       
-        html += """
-        <FORM action="%(APP)s?m=cmatch&u=%(SID)s" method=POST>
-        <INPUT type="hidden" name="Mode" value="List">
-        <H3>List of companies and financial institutions in Forest 500</H3>
-        """ % {'APP': scriptnm, 'SID': sid}
-        # year selector
-        debug += "\ndd = %s\n" % str(dd)
-        qry.execute("select distinct ayear::text, ayear from f500.dirtree union select ' All', 0 order by 1")
-        html += HTML_select("Year", 10, "ayear", qry, dflt=int(dd['AYEAR']));
-        # company type selector
-        qry.execute("select unnest(array['Supply Chain Company', 'Financial Institution', 'All']),unnest(array['CO', 'FI', ''])")
-        html += HTML_select("Company Type", 30, "cotype", qry, dflt=dd['COTYPE']);
-        # update button
-        html += '<INPUT type="submit" name="Update" id="update" value="Update">'
-        html += "<BR clear=all>"
-        html += tbl
-        html += "</FORM>"
+    # HTML for displayed form        
+    html += """
+    <FORM action="%(SCRIPT)s?m=cmatch&u=%(SID)s" method=POST>
+    <BR>&nbsp;<BR>
+    <TABLE class=match><TR style="vertical-align: top">
+        <TD>
+            <TEXTAREA rows=14, cols=70 name="clist">%(CLIST)s</TEXTAREA>
+        </TD><TD style="font-size: small; padding-left: 30px;">
+            Type or paste a list of names. For quick lookup, type a single name and click the GO button.
+            <BR>&nbsp;<BR>
+            <U>Method</U><BR>
+            <INPUT type="radio" value="trase" name="search_opt" %(TRASE_CHK)s>&nbsp;&nbsp;Match to names in trase<BR>
+            <INPUT type="radio" value="info" name="search_opt" %(INFO_CHK)s>&nbsp;&nbsp;Get company info and links
+            <BR>&nbsp;<BR>
+            <INPUT type="submit" name="Search" value="Go" onclick="$('#wait_msg').css('display','block')">
+        </TD><TD>
+    </TR></TABLE>
+    <P id=wait_msg>Please wait : Fetching data...</P>
+    </FORM>        
+    """ % {'SCRIPT': scriptnm, 'SID': sid, 'CLIST': dd['CLIST'], 'TRASE_CHK': dd['TRASE_CHK'], 'INFO_CHK': dd['INFO_CHK']}
+    # add output results to page
+    html += html_out
     # ---- debugging information - list of POST fields ------
     debug += "POST fields:<BR>"
     # trap sensibly any errors looping through list of lists
@@ -1366,6 +1241,45 @@ def cmatch_tool(sid, environ):
     # -------------------------------------------------------
     html += HTML_footer(debug, environ)
     return html
+
+def f500_assess(sid, environ, fileid):
+    # handles display and editing of Forest 500 assessments
+    # show only top level here as a simple DIV.  All the detail is done via ajax (f500_ajax)
+    postFields = getPostFields(environ)
+    # name of calling script (exec or dev)
+    scriptnm =  environ['SCRIPT_NAME']  
+    # HTML for debugging info - left blank if none
+    debug = ""
+    # get company name
+    qry = getCursor()
+    qry.execute("""SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
+                INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
+                WHERE f.flid=%s """, (fileid,))
+    if qry.rowcount==0:
+        cotext = "<P class=error>Company ID # %s not found</P>" % fileid
+    else:
+        co = qry.fetchone()
+        cotext = "<H3>%s&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%s</H3>" % (co['coname'], co['ayear'])
+    js = '<SCRIPT src="https://www.gc-dz.com/js/f500.js"></SCRIPT>'
+    html =  HTML_header(title= "Forest 500 Assessment Data", width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
+    html += cotext
+    html += HTML_footer(environ=environ)
+    # ---- debugging information - list of POST fields ------
+    debug += "POST fields:<BR>"
+    # trap sensibly any errors looping through list of lists
+    try:
+        # list of POST fields
+        for field in postFields.keys():
+            # each field is represented as a list of 1 or more items
+            for f in postFields[field]:
+                debug += '%s = %s<BR>' % (field, f) 
+    except Exception as e:
+        # if error occurs in above, just show traceback
+        debug += traceback.format_exc()
+    # -------------------------------------------------------
+    html += HTML_footer(debug, environ)
+    return html
+
 
 def HTML_select(hdr, sz, name, qry, dflt='', onchg=False):
 # returns HTML for a SELECT dropdown.  'name' is the HTML name tag, qry is a cursor object with at least two fields,
@@ -1390,8 +1304,28 @@ def HTML_select(hdr, sz, name, qry, dflt='', onchg=False):
         html += traceback.format_exc()
         html += "</PRE>"
     return html
+
+def HTML_input(hdr, sz, name, dflt='', onchg=False):
+# returns HTML for a TEXT INPUT.  'name' is the HTML name tag, if onchg is is true, a function called sel_onchg('name') is called.
+# The ID of the SELECT will be id+'name', which can be referenced in the sel_onchg() function.  The default value is 'dflt'.
+# 'hdr' and 'sz' are a heading for the drop down and size in monospaced characters.
+    try:
+        onchg_txt = """onchange='sel_onchg("%s")'""" % name if onchg else ''
+        html = """
+        <DIV class=datafield style="width: %(WIDTH)sch">
+        <P>%(HDR)s</P>
+        <INPUT type=text name=%(NAME)s id=id%(NAME)s %(ONCHG)s value="%(DFLT)s">
+        </DIV> """  % {'HDR': hdr, 'WIDTH': sz, 'NAME': name, 'DFLT': dflt, 'ONCHG': onchg_txt}
+    except Exception as e:
+        # if error occurs in above show traceback + debug info       
+        html = "<PRE>\n"
+        html += "opt = %s\n\n" % str(opt)
+        html += traceback.format_exc()
+        html += "</PRE>"
+    return html
+
     
-def nameCheck(nmlist, chktype, outfmt):
+def nameCheck(nmlist, chktype):
 # undertakes a name search and returns information on any matches in HTML format
 # nmlist - a list of names to be checked
 # chktype - 'trase' for trase/nural alpha engine, 'f500' for my own recipe
@@ -1473,33 +1407,47 @@ def nameCheck(nmlist, chktype, outfmt):
     html += "</TABLE>"            
     return html            
 
-def HTML_header(title = "Data Manager Development Site", extras="", params ="", width=600):
-# standard HTML header for each page.  Title is inserted both as a meta tag and
-# as a title at the top of the visible page, beside the GC logo. Extras should
-# be complete (closed) HTML tags to be inserted in the <HEAD>...</HEAD> section
-# params are GET, POST and action attributes for the <BODY> tag
+def HTML_header(title = "Data Manager Development Site", css="main", extras="", params ="", 
+    width=600, menulink=None, module=""):
+# standard HTML header for each page.  
+# Title is inserted both as a meta tag and as a title at the top of the visible page, beside the GC logo. 
+# module if present, gets a default title from the menu system for this module.  title is ignored if module is given.
+# menulink should be a tuple of (sid, scriptnm) for a menu return link on the GC logo
+# extras are HTML tags for the <HEAD> section, scripts, links, etc.
+# css is the style sheet
+# params are attributes for the <BODY> tag
+    if menulink is None:
+        # do nothing if menu link not given
+        menu_url = ''
+    else:
+        # menulink must be a tuple (sid, scriptnm) otherwise an error will occur here
+        (sid, scriptnm) = menulink
+        menu_url = 'https://www.gc-dz.com/%s?m=menu&u=%s' % (scriptnm, sid)   
+    if module>"":
+        # get menu text for this module as page title
+        qry = getCursor()
+        qry.execute("SELECT menutext FROM gcdz.menus WHERE module=%s", (module,))
+        mnu = qry.fetchone()
+        title = mnu['menutext']             
     template = """
     <!DOCTYPE html>
     <HTML>
     <HEAD>
-    <TITLE>Global Canopy Programme - %(title)s</TITLE>
-    <LINK href="https://www.gc-dz.com/main.css" rel="stylesheet"  type="text/css">
+    <TITLE>Trasepad - %(TITLE)s</TITLE>
+    <LINK href="https://www.gc-dz.com/css/%(CSS)s.css" rel="stylesheet"  type="text/css">
     <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
     <META charset="UTF-8">
-    %(extras)s
+    %(EXTRAS)s
     </HEAD>
-    <BODY %(params)s>
+    <BODY %(PARAMS)s>
     <a name="Top" id="Top"></a>
-    <p ><img src="https://www.gc-dz.com/img/gc.jpg" border=0 height=48px width=182px>
-    &nbsp;
-    <span style="font-size: x-large; font-weight: bold; color: black; text-align: left; vertical-align: 20px;">
-    %(title)s</span></p>
-    <p >&nbsp;</p>
-    <hr size=10 width=%(width)s color="#BABF57" align="left" >
-    <p >&nbsp;</p>
+    <DIV class=logo><a href="%(MENU_URL)s"><img src="https://www.gc-dz.com/img/gc.jpg"></a></DIV>
+    <DIV class=title><H1>%(TITLE)s</H1></DIV>
+    <P class=clear>&nbsp;</P>
+    <HR class=menu style="width: %(WIDTH)spx">
     """
     # substitute parameters in template
-    html = template % {'title': title, 'extras': extras,  'params': params, 'width': width}
+    html = template % {'TITLE': title, 'EXTRAS': extras,  'PARAMS': params, 'WIDTH': width, 'CSS': css, 'MENU_URL': menu_url}
     return html
 
 def HTML_footer(debug="", environ=None):
