@@ -134,8 +134,11 @@ def page_selector(environ):
         # company lists and name matching
         html = cmatch_tool(mdl, sid, environ)     
     elif mdl == 'f500':
-        # company lists and name matching
+        # forest 500 company lists
         html = f500_main(sid, environ)     
+    elif mdl == 'f500a':
+        # forest 500 assessments
+        html = f500_assess(sid, environ)     
     elif mdl == 'sctn':
         # SCTN survey system: latform list, platform detail, survey form
         html = SCTN_sys(sid, environ)
@@ -155,7 +158,7 @@ def mainMenu(sid, environ, pflag):
     # displays the main menu - get the menu details
     # sid - session ID, environ - Apache/WSGI environment array, pflag - permit flag for user)
     qry = getCursor()
-    qry.execute("SELECT id, menutext, module, permitflag, prtorder FROM gcdz.menus ORDER BY prtorder")
+    qry.execute("SELECT id, menutext, module, permitflag, prtorder FROM gcdz.menus WHERE prtorder>0 ORDER BY prtorder")
     if qry.rowcount<=0:
         # if no rows, then a program/database error has occurred
         raise RuntimeError("Menu system not found!!" )
@@ -210,9 +213,11 @@ def ajaxHandler(environ):
             json_str = json.dumps({'html' : html})   
         elif actid=="f500.colist":
             # forest 500 company list matching 'cofind'
-            cofind = postFields.get('cofind',['0'])[0]  
+            cofind = postFields.get('cofind',['0'])[0] 
+            ayear = postFields.get('ayear',['0'])[0] 
+            cotype = postFields.get('cotype',['0'])[0]
             sid = postFields.get('sid',['0'])[0]  
-            html = f500_cofind(sid, cofind)
+            html = f500_cofind(sid, ayear, cotype, cofind)
             json_str = json.dumps({'html' : html})   
         else:
             # unknown action requested   
@@ -516,8 +521,10 @@ def SCTN_sys(sid, environ):
     else:
         # show the platform list
         html += SCTN_list(sid)
+    # ---- debugging information 
+    html += list_debug_info(postFields, debug, show=False)
     # create page footer
-    html += HTML_footer(debug)
+    html += HTML_footer()
     return html
 
 def SCTN_list(sid):
@@ -932,17 +939,8 @@ def SCTN_tool(sid, environ=None):
     else:
         # no data found that meets filer conditions
         html += "<P>-- No platforms match the filter conditions --</P>"    
-    # set True to show Post fields in debug area
-    if False:    
-        debug += "\n\nPOST fields:\n"
-        # list of POST fields
-        for field in postFields.keys():
-            # each field is represented as a list of 1 or more items
-            for f in postFields[field]:
-                debug += '%s = %s\n' % (field, f)      
-    # add debugging info to foot of page, if present
-    if debug > "":
-        html += "<HR style=\"border-top: 5px solid red\"><BR><PRE>%s</PRE>" % debug
+    # ---- debugging information 
+    html += list_debug_info(postFields, debug, show=False)
     # close off page and return
     html += "</FORM></BODY></HTML>"
     return html
@@ -987,7 +985,7 @@ def f500_main(sid, environ):
     # HTML for form heading       
     html += """
         <FORM action="%(APP)s?m=f500&u=%(SID)s" method=POST>
-        <INPUT type="hidden" name="FileID" id="fileid" value=0>
+        <DIV id=colist></DIV>
         """ % {'APP': scriptnm, 'SID': sid}
     # year selector
     # debug += "\ndd = %s\n" % str(dd)
@@ -997,7 +995,7 @@ def f500_main(sid, environ):
     qry.execute("select unnest(array['Supply Chain Company', 'Financial Institution', 'All']),unnest(array['CO', 'FI', ''])")
     html += HTML_select("Company Type", 30, "cotype", qry, dflt=dd['COTYPE']);
     # Filter input selector
-    html += HTML_input("Filter (regex)", 30, "filter", dflt=dd['FILTER']);
+    html += HTML_input("Filter<SMALL> (regular expression)</SMALL>", 30, "filter", dflt=dd['FILTER'], event="onkeyup='updateColist()'");
     # update button
     html += '<INPUT type="submit" name="Update" id="update" value="Update">'
     html += "<BR clear=all></FORM>"
@@ -1006,8 +1004,12 @@ def f500_main(sid, environ):
         # construct WHERE clause based on options
         where = ''
         if dd['AYEAR']>'0' : where += " d.ayear = %s " % dd['AYEAR']
-        if dd['AYEAR']>'0' and dd['COTYPE']>'': where += " AND "
-        if dd['COTYPE']>'': where += " d.cotype = '%s' " % dd['COTYPE']
+        if dd['COTYPE']>'0':
+            if where > '': where += " AND "
+            where += " d.cotype = '%s' " % dd['COTYPE']
+        if dd['FILTER']>'':
+            if where > '': where += " AND "
+            where += " x.coname ~* '%s' " % dd['FILTER']
         if where>'':
             where = " WHERE " + where
         # main query text
@@ -1017,39 +1019,30 @@ def f500_main(sid, environ):
         # get company details
         qry.execute(query)
         # create table headings
-        tbl = """<TABLE class=company-list><TR>
+        tbl = """<FORM action="%(APP)s?m=f500a&u=%(SID)s" method=POST>
+            <INPUT type="hidden" name="FileID" id="fileid" value=0>
+            <TABLE class=company-list><TR>
             <TH style="width: 50px">Type</TH>
             <TH style="width: 50px">Year</TH>
             <TH style="width: 250px">Company Name</TH>
             <TH style="width: 50px">File ID</TH>
             <TH style="width: 350px">Filename</TH>
             <TH style="width: 100px">Last Update</TH>
-            </TR>"""
+            </TR>""" % {'APP': scriptnm, 'SID': sid}
         # create table body
         for row in qry:
             tbl += "<TR onclick='getCoAss(%s)'>" % row['flid']
             for col in row:
                 tbl += "<TD>%s</TD>" % col
             tbl += "</TR>"
-        tbl += "</TABLE>"          
+        tbl += "</TABLE></FORM>"          
     else:    
         # no list to display yet
         tbl = "<P><SMALL>Make a selection from the drop down lists and click <B>Update</B> to see the company list...</SMALL></P>"
     html += tbl
-    # ---- debugging information - list of POST fields ------
-    debug += "POST fields:<BR>"
-    # trap sensibly any errors loopong through list of lists
-    try:
-        # list of POST fields
-        for field in postFields.keys():
-            # each field is represented as a list of 1 or more items
-            for f in postFields[field]:
-                debug += '%s = %s<BR>' % (field, f) 
-    except Exception as e:
-        # if error occurs in above, just show traceback
-        debug += traceback.format_exc()
-    # -------------------------------------------------------
-    html += HTML_footer(debug, environ)
+    # ---- debugging information 
+    html += list_debug_info(postFields, debug, show=False)
+    html += HTML_footer(environ)
     return html
     
 def HTML_xlco_search(coname):
@@ -1136,24 +1129,38 @@ def HTML_datafield(hdr, name, text, minsize=10, pxc=1):
     """ % {'WIDTH': sz, 'HDR': hdr, 'NAME': name, 'TEXT': text}
     return html
     
-def f500_cofind(sid, cofind):
-    # simple search of 'companies' for a matching string
+def f500_cofind(sid, ayear, cotype, cofind):
+    # pre-view of companies selected by a regex, also limited by year and company type
+    # construct WHERE clause based on options
+    where = ''
+    if ayear>'0' : where += " d.ayear = %s " % ayear
+    if cotype > '0':
+        if where > '': where += " AND "
+        where += " d.cotype = '%s' " % cotype
+    if cofind > '':
+        if where > '': where += " AND "
+        where += " x.coname ~* '%s' " % cofind
+    if where>'':
+        where = " WHERE " + where
+    # main query text
+    query = """SELECT DISTINCT x.coname FROM f500.xlcohdr AS x 
+        INNER JOIN f500.filelist AS f ON x.flid=f.flid 
+        INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
+        %s ORDER BY 1 LIMIT 20 """ % where
     qry = getCursor()
-    qry.execute("SELECT coid, cosubsid, coyear FROM f500.companies WHERE cosubsid ~* %s ORDER BY 2, 3", (cofind,))
-    # only show first m, or all if less than m matches
-    m = 20
-    if qry.rowcount>m:
-        flds = qry.fetchmany(m)
-    elif qry.rowcount>0:
-        flds = qry.fetchall()
-    else:
+    qry.execute(query)
+    if qry.rowcount == 0:
         html = "<P>[No matches found]</P>"
-        return html
-    # list companies found  
-    html = "<UL>"  
-    for co in flds:
-        html += "<LI class=colink onclick='fetchCompany(%s)'>%s [%s]" % (co['coid'], co['cosubsid'], co['coyear'])
-    html += "</UL>"  
+        #html += "<P>%s</P>" % query     # diagnostic only
+    else:
+        flds = qry.fetchall()
+        # list companies found  
+        html = "<UL>"  
+        for co in flds:
+            html += "<LI>%s" % co[0]
+        html += "</UL>"  
+        if qry.rowcount>=20:
+            html += "<P>...(more)...<P>"
     return html        
 
 def yrass(names):
@@ -1226,23 +1233,12 @@ def cmatch_tool(module, sid, environ):
     """ % {'SCRIPT': scriptnm, 'SID': sid, 'CLIST': dd['CLIST'], 'TRASE_CHK': dd['TRASE_CHK'], 'INFO_CHK': dd['INFO_CHK']}
     # add output results to page
     html += html_out
-    # ---- debugging information - list of POST fields ------
-    debug += "POST fields:<BR>"
-    # trap sensibly any errors looping through list of lists
-    try:
-        # list of POST fields
-        for field in postFields.keys():
-            # each field is represented as a list of 1 or more items
-            for f in postFields[field]:
-                debug += '%s = %s<BR>' % (field, f) 
-    except Exception as e:
-        # if error occurs in above, just show traceback
-        debug += traceback.format_exc()
-    # -------------------------------------------------------
-    html += HTML_footer(debug, environ)
+    # ---- debugging information 
+    html += list_debug_info(postFields, debug, show=False)
+    html += HTML_footer(environ)
     return html
 
-def f500_assess(sid, environ, fileid):
+def f500_assess(sid, environ):
     # handles display and editing of Forest 500 assessments
     # show only top level here as a simple DIV.  All the detail is done via ajax (f500_ajax)
     postFields = getPostFields(environ)
@@ -1250,49 +1246,132 @@ def f500_assess(sid, environ, fileid):
     scriptnm =  environ['SCRIPT_NAME']  
     # HTML for debugging info - left blank if none
     debug = ""
+    fileid = postFields.get('FileID',[0])[0]
+    js = '<SCRIPT src="https://www.gc-dz.com/js/f500.js"></SCRIPT>'
     # get company name
     qry = getCursor()
     qry.execute("""SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
                 INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
                 WHERE f.flid=%s """, (fileid,))
     if qry.rowcount==0:
+        # show error heading, message and Close button
+        html =  HTML_header(title= "Forest 500 Assessment - Error", width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
         cotext = "<P class=error>Company ID # %s not found</P>" % fileid
-    else:
-        co = qry.fetchone()
-        cotext = "<H3>%s&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;%s</H3>" % (co['coname'], co['ayear'])
-    js = '<SCRIPT src="https://www.gc-dz.com/js/f500.js"></SCRIPT>'
-    html =  HTML_header(title= "Forest 500 Assessment Data", width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
-    html += cotext
-    html += HTML_footer(environ=environ)
-    # ---- debugging information - list of POST fields ------
-    debug += "POST fields:<BR>"
-    # trap sensibly any errors looping through list of lists
-    try:
-        # list of POST fields
-        for field in postFields.keys():
-            # each field is represented as a list of 1 or more items
-            for f in postFields[field]:
-                debug += '%s = %s<BR>' % (field, f) 
-    except Exception as e:
-        # if error occurs in above, just show traceback
-        debug += traceback.format_exc()
-    # -------------------------------------------------------
-    html += HTML_footer(debug, environ)
+        html += "<p>&nbsp;</p><INPUT type=button value='Close' onclick='window.close()'>"
+        return html
+    # get company details and construct normal heading    
+    co = qry.fetchone()
+    title = "Forest 500 Assessment %s : %s" % (co['ayear'], co['coname'])
+    html =  HTML_header(title, width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
+    # company header detail
+    html += HTML_input("Company Name", 40, "coname", co['coname'])
+    html += HTML_input("Year", 5, "ayear", co['ayear'], 'disabled')
+    html += HTML_input("Type", 5, "cotype", co['cotype'], 'disabled')
+    html += "<BR clear=all>"
+    # match in companies table  
+    # ---- to do ----
+    # main indicator groups as a set of buttons
+    qry.execute("""SELECT igid, heading FROM f500.ind_groups WHERE ayear=%s AND cotype=%s 
+        ORDER BY igid""", (co['ayear'], co['cotype']))
+    groups = qry.fetchall()
+    for gp in groups:
+        name= "IG%s" % gp['igid']
+        js = 'toggleIndGroup(%s)' % gp['igid']
+        btn_text = HTML_clean(gp['heading'])
+        btn_val = HTML_clean(gp['igid'])
+        html += HTML_button(name, btn_text, btn_val,'ind-gp-btn', js)     
+        html += "<BR>"
+        html += "<DIV id=div%s class=ind-gp-div>" % gp['igid']          
+        # retrieve indicator details for this group
+        qry.execute("""SELECT DISTINCT inid, indgrp, indnum, indtext, guide, scoring, maxpts FROM f500.ind_main 
+            WHERE inid/100 = %s ORDER BY 1""",(int(gp['igid']),))
+        indlist = qry.fetchall()
+        for ind in indlist:
+            # generate HTML for indicator description
+            html += HTML_indDesc(ind)
+        html += "</DIV>"                   
+    # show window close button at bottom of page
+    html += "<p>&nbsp;</p><INPUT type=button value='Close' onclick='window.close()'>"
+    # ---- debugging information 
+    html += list_debug_info(postFields, debug, show=True)
+    html += "</BODY></HTML>"    
+    return html
+
+def HTML_indDesc(ind):
+    # creates the HTML for a single indicator.
+    # 'ind' has fields inid, indgrp, indnum, indtext, guide, scoring, maxpts
+    # first get rid of 'dangerous' charcaters in the text fields
+    text = HTML_clean(ind['indtext'])
+    guide = HTML_clean(ind['guide'], br=True)
+    score = HTML_clean(ind['scoring'], br=True)
+    # now create the table stucture with the cleaned up text.  
+    html = """
+        <DIV class=ind-row-top id=ind-A-%(INID)s >
+            <DIV class=ind-num>%(GP)s.%(NUM)s</DIV>
+            <DIV class=ind-text>%(TEXT)s</DIV>
+            <DIV class=ind-note><IMG class=link src="https://www.gc-dz.com/img/note_btn.png" onclick='toggleIndTable(%(INID)s)'></DIV>
+        </DIV>
+        <DIV class=ind-row-2nd id=ind-B-%(INID)s>            
+            <DIV class=ind-guide>%(GUIDE)s</DIV>
+            <DIV class=ind-score>%(SCOR)s</DIV>
+            <DIV class=ind-max>%(MAX)s</DIV>
+        </DIV>
+        <BR clear=all>
+    """ % {'INID': ind['inid'], 'GP': ind['indgrp'], 'NUM': ind['indnum'], 'TEXT': text, \
+        'GUIDE': guide, 'SCOR': score, 'MAX': ind['maxpts']}
+    return html    
+
+def HTML_clean(text, br=False):
+    # replaces the characters &<>"' with HTML equivalents to avoid problems when injecting text into HTML    
+    badch = '&<>"\''
+    htmch = ['&amp;', '&lt;', '&gt;', '&quot;', '&#39;']
+    txt = str(text)
+    for i, ch in enumerate(badch):
+        txt = re.sub(ch, htmch[i], txt)
+    if br:
+        # replace cr/lf with <BR>
+        txt = re.sub('\r\n*', "<BR>", txt)           
+    return txt
+        
+def HTML_button(name, label, value, css="", onclick=""):
+    # returns HTML for a button with text 'label', CSS 'class', javascript 'onclick'
+    html = "<BUTTON name=%s, id=%s, value='%s' class=%s onclick='%s'>%s</BUTTON>" % \
+            (name, name, value, css, onclick, label)
+    return html           
+
+def list_debug_info(postFields=None, debug="", show=False):
+    # list of POST fields for debugging.  'debug' can contain other debugging info.
+    # by defualt , switch off.  show=True required to display listing.
+    html = "<DIV id='debug'>"   # always create empty DIV.  Javascript may put messages here
+    if show:
+        html += "<BR><HR class=debug><P>%s</P>" % debug
+        if postFields is not None:
+            html += "POST fields:<BR>"
+            # trap sensibly any errors looping through list of lists
+            try:
+                # list of POST fields
+                for field in postFields.keys():
+                    # each field is represented as a list of 1 or more items
+                    for f in postFields[field]:
+                        html += '%s = %s<BR>' % (field, f) 
+            except Exception as e:
+                # if error occurs in above, just show traceback
+                html += traceback.format_exc()
+    html += "</DIV>"   # end of debug div    
     return html
 
 
-def HTML_select(hdr, sz, name, qry, dflt='', onchg=False):
+def HTML_select(hdr, sz, name, qry, dflt='', event=''):
 # returns HTML for a SELECT dropdown.  'name' is the HTML name tag, qry is a cursor object with at least two fields,
-# representing labels and values for the SELECT options. if onchg is is true, a function called sel_onchg('name') is called.
+# representing labels and values for the SELECT options. 'event' is text for an event routine such as "onclick = 'doSomeJs()'".
 # The ID of the SELECT will be id+'name', which can be referenced in the sel_onchg() function.  The default option whose
 # label is 'dflt' is check.  'hdr' and 'sz' are a heading for the drop down and size in monospaced characters.
     try:
-        onchg_txt = """onchange='sel_onchg("%s")'""" % name if onchg else ''
         html = """
         <DIV class=datafield style="width: %(WIDTH)sch">
         <P>%(HDR)s</P>
-        <SELECT name=%(NAME)s id=id%(NAME)s %(ONCHG)s>
-        """  % {'HDR': hdr, 'WIDTH': sz, 'NAME': name, 'ONCHG': onchg_txt}
+        <SELECT name=%(NAME)s id=id%(NAME)s %(EVENT)s>
+        """  % {'HDR': hdr, 'WIDTH': sz, 'NAME': name, 'EVENT': event}
         for opt in qry:
             selct = 'selected' if opt[1]==dflt else ''
             html += "<OPTION value='%s' %s>%s</option>" % (opt[1], selct, opt[0])
@@ -1305,17 +1384,16 @@ def HTML_select(hdr, sz, name, qry, dflt='', onchg=False):
         html += "</PRE>"
     return html
 
-def HTML_input(hdr, sz, name, dflt='', onchg=False):
-# returns HTML for a TEXT INPUT.  'name' is the HTML name tag, if onchg is is true, a function called sel_onchg('name') is called.
+def HTML_input(hdr, sz, name, dflt='', event=''):
+# returns HTML for a TEXT INPUT.  'name' is the HTML name tag.'event' is text for an event routine such as "onclick = 'doSomeJs()'".
 # The ID of the SELECT will be id+'name', which can be referenced in the sel_onchg() function.  The default value is 'dflt'.
 # 'hdr' and 'sz' are a heading for the drop down and size in monospaced characters.
     try:
-        onchg_txt = """onchange='sel_onchg("%s")'""" % name if onchg else ''
         html = """
         <DIV class=datafield style="width: %(WIDTH)sch">
         <P>%(HDR)s</P>
-        <INPUT type=text name=%(NAME)s id=id%(NAME)s %(ONCHG)s value="%(DFLT)s">
-        </DIV> """  % {'HDR': hdr, 'WIDTH': sz, 'NAME': name, 'DFLT': dflt, 'ONCHG': onchg_txt}
+        <INPUT type=text name=%(NAME)s id=id%(NAME)s %(EVENT)s value="%(DFLT)s">
+        </DIV> """  % {'HDR': hdr, 'WIDTH': sz, 'NAME': name, 'DFLT': dflt, 'EVENT': event}
     except Exception as e:
         # if error occurs in above show traceback + debug info       
         html = "<PRE>\n"
@@ -1450,20 +1528,16 @@ def HTML_header(title = "Data Manager Development Site", css="main", extras="", 
     html = template % {'TITLE': title, 'EXTRAS': extras,  'PARAMS': params, 'WIDTH': width, 'CSS': css, 'MENU_URL': menu_url}
     return html
 
-def HTML_footer(debug="", environ=None):
+def HTML_footer(environ=None):
     # standard HTML footer with back|menu link adn debugging material
-    # add debugging material below a red line if debug string is non-blank
-    if debug>"":
-        debug = "<HR style='color: red; border-width: 1px;'><BR>" + debug
     # if no environment data, footer link simply replicates Back button     
     if environ is None:
         html = """
         <p>&nbsp;</p>
         <p style="text-decoration: underline; color: green; cursor: pointer;" onclick="window.history.back()" title="Back to previous page">Back</p>
-        <P id='debug'>%(DEBUG)s</P>
         </BODY>
         </HTML>    
-        """ % {'DEBUG': debug}
+        """ 
     else:
         # retrieve session ID and script name, then give return link to menu page
         params = cgi.parse_qs(environ['QUERY_STRING']) 
@@ -1472,10 +1546,9 @@ def HTML_footer(debug="", environ=None):
         html = """
         <p>&nbsp;</p>
         <A href="https://www.gc-dz.com/%(APP)s?m=menu&u=%(SID)s" title="Return to menu">Menu</A>
-        <P id='debug'>%(DEBUG)s</P>
         </BODY>
         </HTML>    
-        """ % {'SID': sid, 'APP': scriptnm, 'DEBUG': debug}
+        """ % {'SID': sid, 'APP': scriptnm}
     return html
 
 def makeHTMLtable(qry, n=0, m=10, lines='LightBlue', altrows='LightCyan'):
