@@ -1,5 +1,5 @@
 """
- ------------- gc_dz.py version 0.12 Mar 2019 ------------
+ ------------- gc_dz.py version 0.14 Mar 2019 ------------
  This module handles all the server-side active content for the gc-dz.com 
  website.  It is called using the WSGI interface via the gc-dz.com/exec alias.  
  The entry point for /exec calls is the application() function.  This returns
@@ -14,12 +14,8 @@
 # note that in development versions, /exec is substituted by /dev
 
 # --- revision history ---
-# v 0.07 25 Jan 2019  Adding code for revised login procedure via email link
-# v 0.08 08 Feb 2019  Menu system access from email link, also remove obsolete code
-# v 0.09 11 Feb 2019  Permit system finalised, landing page for F500
-# v 0.10 18 Feb 2019  Trase/Neural Alpha name matching tools implemented
-# v 0.11 22 Feb 2019  Forest 500 company listing/selection
-# v 0.12 05 Mar 2019  Consolidate work so far of f500_ defs
+# v 0.13 25 Mar 2019  F500_assess() form revised and debugged
+# v 0.14 27 Mar 2019  Internet links in F500 notes enabled, a few minor tweaks
 # ------------------------
  
 # CGI interface functions for Python
@@ -29,6 +25,7 @@ import os, sys, re, datetime
 import random, string
 from urllib.parse import urlparse
 import unidecode
+import textwrap
 
 # Python modules for the email system and encryption
 from smtplib import SMTP
@@ -219,6 +216,14 @@ def ajaxHandler(environ):
             sid = postFields.get('sid',['0'])[0]  
             html = f500_cofind(sid, ayear, cotype, cofind)
             json_str = json.dumps({'html' : html})   
+        elif actid == 'f500a.indNotes':
+            inid   = postFields.get('inid',['0'])[0]      
+            cid    = postFields.get('cid',['0'])[0]       
+            sid    = postFields.get('sid',['0'])[0]       
+            flid   = postFields.get('flid',['0'])[0]
+            imgid  = postFields.get('imgid',['0'])[0]     
+            html = f500_indNotes(inid, cid, sid, flid, imgid)
+            json_str = json.dumps({'html' : html})               
         else:
             # unknown action requested   
             raise RuntimeError("Unknown Action '%s' requested" % actid)
@@ -366,11 +371,13 @@ def logTempUser(sid, ip):
     qry.connection.commit()
     return sid      
     
-def error_page(msg, lgin=0):
+def error_page(msg, lgin=0, debug=''):
     # returns HTML for an error page, with message 'msg' in red bold
     template = '<p style="font-weight:bold; color: red">%s</p>'
-    html = HTML_header("Data Manager Development Site")
+    html = HTML_header("Data Manager Development Site", css="f500", width=900)
     html += (template % msg)
+    if debug >'':
+        html += debug
     if lgin==0:
         # standard 'Back link' on page footer
         html += HTML_footer()
@@ -434,6 +441,7 @@ def sessionStart(environ):
     # It closes any session more than 48 hours old.
     # It adds a record in the stats table for the module accessed.
     #
+    debug=""
     params = cgi.parse_qs(environ['QUERY_STRING']) 
     ip = environ['REMOTE_ADDR'] 
     # check u parameter for session ID
@@ -458,17 +466,21 @@ def sessionStart(environ):
     # close any sessions more than 2 days old
     qry.execute("""UPDATE gcdz.logins SET timeout=NOW() WHERE timeout IS NULL 
         AND NOW()-timeout > '2 days' """ , {'SID': sid, 'IP': ip})
+    debug += "<P>Query 1:<B>%s<P>" % qry.query    
     # if this session was started from a different IP, close it
     qry.execute("""UPDATE gcdz.logins SET timeout=NOW() WHERE sessionid=%(SID)s AND timeout IS NULL 
         AND ipaddr <> %(IP)s""" , {'SID': sid, 'IP': ip})        
+    debug += "<P>Query 2:<B>%s<P>" % qry.query    
     # search for an open session    
     qry.execute("""
         SELECT U.userid, U.permit, L.timeon, L.ipaddr FROM gcdz.users AS U INNER JOIN gcdz.logins AS L
         ON U.userid=L.userid WHERE sessionid=%(SID)s AND timeout IS NULL
         """, {'SID': sid})
+    debug += "<P>Query 3:<B>%s<P>" % qry.query    
     # if no match, session does not exist or has timed out
     if qry.rowcount<=0:
-        html = error_page("Session ID has expired (limit 48 hours) or was from a different network - Please login again", 1)
+        debug_text = list_debug_info(debug=debug, show=False)
+        html = error_page("Session ID has expired (limit 48 hours) or was from a different network - Please login again", lgin=1, debug=debug_text)
         return (html, sid, pflag)
     # at this point session has been validated.  Retrieve permit flags for this user        
     flds = qry.fetchone()
@@ -963,7 +975,7 @@ def f500_main(sid, environ):
     # get setting of update button (True if clicked, False otherwise)
     update_btn = postFields.get('Update',[''])[0] == 'Update'
     # set default data values for controls
-    dd = {'AYEAR': '0', 'COTYPE': '', 'FILTER': ''}   
+    dd = {'AYEAR': '0', 'COTYPE': '', 'FILTER': '', 'LISTOPT': '3'}   
     # open database cursor 
     qry = getCursor()
     if update_btn:
@@ -971,6 +983,7 @@ def f500_main(sid, environ):
         dd['AYEAR'] = postFields.get('ayear', [''])[0]
         dd['COTYPE'] = postFields.get('cotype', [''])[0] 
         dd['FILTER'] = postFields.get('filter', [''])[0] 
+        dd['LISTOPT'] = postFields.get('listopt', [''])[0] 
         # save as defaults 
         qry.execute("""INSERT INTO gcdz.def_data (sessionid, ddtag, ddinfo) VALUES (%(SID)s, 'F500_List', %(DD)s)   
             ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
@@ -993,9 +1006,12 @@ def f500_main(sid, environ):
     html += HTML_select("Year", 10, "ayear", qry, dflt=int(dd['AYEAR']));
     # company type selector
     qry.execute("select unnest(array['Supply Chain Company', 'Financial Institution', 'All']),unnest(array['CO', 'FI', ''])")
-    html += HTML_select("Company Type", 30, "cotype", qry, dflt=dd['COTYPE']);
+    html += HTML_select("Company Type", 24, "cotype", qry, dflt=dd['COTYPE']);
     # Filter input selector
     html += HTML_input("Filter<SMALL> (regular expression)</SMALL>", 30, "filter", dflt=dd['FILTER'], event="onkeyup='updateColist()'");
+    # list options
+    qry.execute("select unnest(array['Summary scores', 'Company Linking Tool', 'Excel filenames']),unnest(array['1', '2', '3'])")
+    html += HTML_select("Listing Format", 24, "listopt", qry, dflt=dd['LISTOPT']);
     # update button
     html += '<INPUT type="submit" name="Update" id="update" value="Update">'
     html += "<BR clear=all></FORM>"
@@ -1003,38 +1019,124 @@ def f500_main(sid, environ):
         # create HTML table for list of companies
         # construct WHERE clause based on options
         where = ''
-        if dd['AYEAR']>'0' : where += " d.ayear = %s " % dd['AYEAR']
+        if dd['AYEAR']>'0' : where += " ayear = %s " % dd['AYEAR']
         if dd['COTYPE']>'0':
             if where > '': where += " AND "
-            where += " d.cotype = '%s' " % dd['COTYPE']
+            where += " cotype = '%s' " % dd['COTYPE']
         if dd['FILTER']>'':
             if where > '': where += " AND "
-            where += " x.coname ~* '%s' " % dd['FILTER']
+            where += " coname ~* '%s' " % dd['FILTER']
         if where>'':
             where = " WHERE " + where
-        # main query text
-        query = """SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
-            INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
-            %s ORDER BY d.cotype, x.coname, d.ayear """ % where
-        # get company details
-        qry.execute(query)
-        # create table headings
-        tbl = """<FORM action="%(APP)s?m=f500a&u=%(SID)s" method=POST>
-            <INPUT type="hidden" name="FileID" id="fileid" value=0>
-            <TABLE class=company-list><TR>
-            <TH style="width: 50px">Type</TH>
-            <TH style="width: 50px">Year</TH>
-            <TH style="width: 250px">Company Name</TH>
-            <TH style="width: 50px">File ID</TH>
-            <TH style="width: 350px">Filename</TH>
-            <TH style="width: 100px">Last Update</TH>
-            </TR>""" % {'APP': scriptnm, 'SID': sid}
-        # create table body
-        for row in qry:
-            tbl += "<TR onclick='getCoAss(%s)'>" % row['flid']
-            for col in row:
-                tbl += "<TD>%s</TD>" % col
+        # query and table headings depend on List Option
+        if dd['LISTOPT'] == '1':    
+            # query format for commodity scores - get the company list
+            query = "SELECT cotype, ayear, coname, flid FROM f500.company_file %s ORDER BY 1, 3, 2 " % where
+            # get company details as a list
+            qry.execute(query)
+            colist = qry.fetchall()
+            # get commodity and total scores for these companies
+            query = "SELECT flid, cid, score, assd FROM f500.commodity_scores INNER JOIN f500.company_file USING (flid) " + where
+            qry.execute(query)
+            scores = qry.fetchall()
+            score_lookup = makeKeylist(scores, 'flid', 'cid')
+            # get commodity names and indices for headings
+            qry.execute("SELECT cid, commodity FROM f500.commodities WHERE cid>0 ORDER BY cid")
+            comlist = qry.fetchall()
+            commodities = makeKeylist(comlist, 'cid')            
+            # create table headings
+            tbl = """<FORM action="%(APP)s?m=f500a&u=%(SID)s" method=POST>
+                <INPUT type="hidden" name="FileID" id="fileid" value=0>
+                <TABLE class=company-list><TR>
+                <TH style="width: 50px">Type</TH>
+                <TH style="width: 50px">Year</TH>
+                <TH style="width: 250px">Company Name</TH>
+                <TH style="width: 50px">File ID</TH>
+                <TH style="width: 75px">Total</TH>
+                """ % {'APP': scriptnm, 'SID': sid}
+            # commodity headings    
+            for (cid, data) in commodities.items():
+                tbl +=  "<TH style='width: 75px'>%s</TH>" % data['commodity']
+            # finish header row    
             tbl += "</TR>"
+            # work through company list
+            for co in colist:
+                flid = co['flid']
+                # click on row to get assessment page
+                tbl += "<TR onclick='getCoAss(%s)'>" % flid
+                # company type, year, name and file ID
+                tbl += "<TD>%s</TD>" % co['cotype']
+                tbl += "<TD>%s</TD>" % co['ayear']
+                tbl += "<TD>%s</TD>" % co['coname']
+                tbl += "<TD>%s</TD>" % flid
+                # total score - applicable to all types
+                key = '%s+0' % flid
+                # check key value OK
+                if key in score_lookup:
+                    tbl += HTML_score_td(score_lookup[key]['score'])
+                    # if type CO, give commodity scores
+                    if co['cotype']=='CO':
+                        for cid in commodities.keys():
+                            # get score for this company and commodity
+                            key = '%s+%s' % (flid, cid)
+                            assd = score_lookup[key]['assd']
+                            # check if it was assessed (YES or 1)
+                            if re.search('yes|1', str(assd), re.I):
+                                tbl += HTML_score_td(score_lookup[key]['score'])
+                            else:
+                                tbl += "<TD class=center>-</TD>"             # not assessed - hyphen/dash
+                    else:
+                        # financial institution - no commodity scores - display rest or row as blank       
+                        tbl += "<TD colspan=%s>&nbsp;</TD>" % len(comlist)
+                else:
+                    # bad key value - output diagnostic message
+                    tbl += "<TD colspan=%s>Error: FileID not in MV f500.company_file</TD>" % len(comlist)                            
+                # end of row               
+                tbl += "</TR>"
+        elif dd['LISTOPT'] == '2': 
+            # query format for grouping tool  ----- to be amended --------
+            query = """SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
+                INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
+                %s ORDER BY d.cotype, x.coname, d.ayear """ % where
+            # get company details
+            qry.execute(query)
+            # create table headings
+            tbl = """<FORM action="%(APP)s?m=f500a&u=%(SID)s" method=POST>
+                <INPUT type="hidden" name="FileID" id="fileid" value=0>
+                <TABLE class=company-list><TR>
+                <TH style="width: 50px">Type</TH>
+                <TH style="width: 50px">Year</TH>
+                <TH style="width: 250px">Company Name</TH>
+                <TH style="width: 50px">File ID</TH>
+                <TH style="width: 350px">Filename</TH>
+                <TH style="width: 100px">Last Update</TH>
+                </TR>""" % {'APP': scriptnm, 'SID': sid}
+        elif dd['LISTOPT'] == '3': 
+            # query format with file names
+            query = """SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
+                INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
+                %s ORDER BY d.cotype, x.coname, d.ayear """ % where
+            # get company details
+            qry.execute(query)
+            # create table headings
+            tbl = """<FORM action="%(APP)s?m=f500a&u=%(SID)s" method=POST>
+                <INPUT type="hidden" name="FileID" id="fileid" value=0>
+                <TABLE class=company-list><TR>
+                <TH style="width: 50px">Type</TH>
+                <TH style="width: 50px">Year</TH>
+                <TH style="width: 250px">Company Name</TH>
+                <TH style="width: 50px">File ID</TH>
+                <TH style="width: 350px">Filename</TH>
+                <TH style="width: 100px">Last Update</TH>
+                </TR>""" % {'APP': scriptnm, 'SID': sid}        
+            # create table body
+            for row in qry:
+                tbl += "<TR onclick='getCoAss(%s)'>" % row['flid']
+                for col in row:
+                    tbl += "<TD>%s</TD>" % col
+                tbl += "</TR>"
+        else:
+            raise RuntimeError("Unrecognised option code '%s'!" % dd['LISTOPT'])        
         tbl += "</TABLE></FORM>"          
     else:    
         # no list to display yet
@@ -1044,7 +1146,37 @@ def f500_main(sid, environ):
     html += list_debug_info(postFields, debug, show=False)
     html += HTML_footer(environ)
     return html
-    
+
+def makeKeylist(alist, akey, akey2=''):
+    # given a list of dictionaries, converts it to a dictionary of dictionaries,
+    # using 'aKey' as the lookup key.  if second key is given, they are joined with +
+    klist={}
+    for row in alist:
+        if akey2=='':
+            # single key
+            klist[row[akey]] = row
+        else:
+            # two keys, key+key2
+            klist['%s+%s' % (row[akey], row[akey2])] = row
+    return klist    
+
+def HTML_score_td(score, css_class='center'):
+    # safe conversion of a score to a centered table cell value.  Values that are not
+    # valid floating points are returned as strings, in a TD wrapper
+    try:
+        f = float(score)
+        if f>0.0 and f<1.0:
+            # output as a percentage if between 0 and 1
+            p = 100.0 * f
+            td = "<TD class=%s>%s%%</TD>" % (css_class, "{:5.1f}".format(p))             
+        else:
+            # otherwise output as a raw score to 3 sig figs.    
+            td = "<TD class=%s>%s</TD>" % (css_class, "{:5.3g}".format(f))
+    except (ValueError) as msg:
+        # not a number - output as is
+        td = "<TD class=%s>%s</TD>" % (css_class, score)
+    return td
+        
 def HTML_xlco_search(coname):
     # search for a name from the 'Companies' list and returns matching files from the 'xlcohdr' table
     # in an HTML format as part of a form, together with assessment years
@@ -1131,6 +1263,8 @@ def HTML_datafield(hdr, name, text, minsize=10, pxc=1):
     
 def f500_cofind(sid, ayear, cotype, cofind):
     # pre-view of companies selected by a regex, also limited by year and company type
+    # This is an Ajax routine, called via ajaxHandler() and javascript updateColist() in f500.js.
+    # It services the regex preview function for company lists
     # construct WHERE clause based on options
     where = ''
     if ayear>'0' : where += " d.ayear = %s " % ayear
@@ -1256,71 +1390,217 @@ def f500_assess(sid, environ):
     if qry.rowcount==0:
         # show error heading, message and Close button
         html =  HTML_header(title= "Forest 500 Assessment - Error", width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
-        cotext = "<P class=error>Company ID # %s not found</P>" % fileid
+        html += "<P class=error style='display: block'>Company ID not specified</P>" 
         html += "<p>&nbsp;</p><INPUT type=button value='Close' onclick='window.close()'>"
+        html += "</BODY></HTML>"    
         return html
     # get company details and construct normal heading    
     co = qry.fetchone()
     title = "Forest 500 Assessment %s : %s" % (co['ayear'], co['coname'])
     html =  HTML_header(title, width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
-    # company header detail
-    html += HTML_input("Company Name", 40, "coname", co['coname'])
-    html += HTML_input("Year", 5, "ayear", co['ayear'], 'disabled')
-    html += HTML_input("Type", 5, "cotype", co['cotype'], 'disabled')
+    # FORM action and hidden fields used if page is submitted
+    #html += "<INPUT type=hidden name=FileID id=FileID value=%s>" % fileid
+    # get names of same company in different years for the dropdown slector
+    qry.execute("""SELECT CONCAT(x.coname, ' {', d.ayear, '}') AS coname_yr, x.flid::TEXT FROM f500.coflids AS c
+    	INNER JOIN f500.xlcohdr AS x ON c.flid=x.flid
+    	INNER JOIN f500.filelist AS f ON x.flid=f.flid 
+    	INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid 
+    	WHERE ucid IN (SELECT ucid FROM f500.coflids WHERE flid=%s)
+    	ORDER BY 2 """, (fileid,))    
+    # company-year selector
+    html += "<FORM action='%(APP)s?m=f500a&u=%(SID)s' id=form1 method=POST>" % {'APP': scriptnm, 'SID': sid}
+    html += HTML_select("Company and Year", 50, "FileID", qry, fileid, "onchange=\"$('#form1').submit()\"")
+    if qry.rowcount==0:
+        html += "<P><SMALL>Company not listed in COFLIDS table!</SMALL></P>"
     html += "<BR clear=all>"
+    #debug += "<P>Query:<BR>%s</P>" % qry.query    
+    #debug += "<P>Query returned %s rows</P>" % qry.rowcount
     # match in companies table  
     # ---- to do ----
+    # get commodities assessed as a list
+    qry.execute("""SELECT c.cid, xltext AS asmt FROM f500.xldata AS x 
+    	INNER JOIN f500.filelist AS f ON x.flid=f.flid 
+    	INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid 
+    	INNER JOIN f500.cscore_cells AS c ON c.cass=x.xlcell AND c.ayear=d.ayear 
+    	WHERE d.cotype='CO' AND x.flid=%s ORDER BY 1
+        """, (fileid,))
+    # covert retrieved records into a list of assessed commodities, by index number 
+    if qry.rowcount>0:
+        cdlist = []
+        for cd in qry:
+            if re.search('^([Yy]|1)',cd['asmt']):
+                cdlist.append(cd['cid'])
+    else:
+        cdlist = None            
     # main indicator groups as a set of buttons
     qry.execute("""SELECT igid, heading FROM f500.ind_groups WHERE ayear=%s AND cotype=%s 
         ORDER BY igid""", (co['ayear'], co['cotype']))
+    html += "<TABLE class=ind-tbl>"
+    html += "<TBODY>"   
     groups = qry.fetchall()
     for gp in groups:
         name= "IG%s" % gp['igid']
         js = 'toggleIndGroup(%s)' % gp['igid']
         btn_text = HTML_clean(gp['heading'])
         btn_val = HTML_clean(gp['igid'])
-        html += HTML_button(name, btn_text, btn_val,'ind-gp-btn', js)     
-        html += "<BR>"
-        html += "<DIV id=div%s class=ind-gp-div>" % gp['igid']          
+        html += """<TR class=btn-row><TD colspan=3>%s</TD></TR>""" % HTML_button(name, btn_text, btn_val,'ind-gp-btn', js)     
         # retrieve indicator details for this group
         qry.execute("""SELECT DISTINCT inid, indgrp, indnum, indtext, guide, scoring, maxpts FROM f500.ind_main 
             WHERE inid/100 = %s ORDER BY 1""",(int(gp['igid']),))
         indlist = qry.fetchall()
         for ind in indlist:
-            # generate HTML for indicator description
-            html += HTML_indDesc(ind)
-        html += "</DIV>"                   
+            # generate HTML for main indicator description
+            (htm, dbg) =  HTML_indMain(ind, fileid, cdlist)
+            html += htm
+            debug += dbg
+    # finish off table layout
+    html += "</TBODY></TABLE>"             
+    html += "</FORM>"
     # show window close button at bottom of page
     html += "<p>&nbsp;</p><INPUT type=button value='Close' onclick='window.close()'>"
+    # pop-up notes DIV.  This positioned and populated in Javascript/ajax (see f500_indNotes).
+    html += "<DIV id=ind-notes></DIV>"	
     # ---- debugging information 
-    html += list_debug_info(postFields, debug, show=True)
+    html += list_debug_info(postFields, debug, show=False)
     html += "</BODY></HTML>"    
     return html
 
-def HTML_indDesc(ind):
-    # creates the HTML for a single indicator.
+def HTML_indMain(ind, fileid, cdlist):
+    # creates the HTML for a main indicator
     # 'ind' has fields inid, indgrp, indnum, indtext, guide, scoring, maxpts
-    # first get rid of 'dangerous' charcaters in the text fields
-    text = HTML_clean(ind['indtext'])
+    # fileid is file being processed.  cdlist is a list of applicable commodity indices, or None 
+    # if commodities not applicable to this file, ie a financial institution
+    #
+    debug=""
+    inid = ind['inid']      # shorthand as field for Indicator ID is referenced repeatedly
+    # first get rid of 'dangerous' characters in the text fields, but keep line breaks.
+    text = HTML_clean(ind['indtext'], br=True)
     guide = HTML_clean(ind['guide'], br=True)
-    score = HTML_clean(ind['scoring'], br=True)
-    # now create the table stucture with the cleaned up text.  
-    html = """
-        <DIV class=ind-row-top id=ind-A-%(INID)s >
-            <DIV class=ind-num>%(GP)s.%(NUM)s</DIV>
-            <DIV class=ind-text>%(TEXT)s</DIV>
-            <DIV class=ind-note><IMG class=link src="https://www.gc-dz.com/img/note_btn.png" onclick='toggleIndTable(%(INID)s)'></DIV>
-        </DIV>
-        <DIV class=ind-row-2nd id=ind-B-%(INID)s>            
-            <DIV class=ind-guide>%(GUIDE)s</DIV>
-            <DIV class=ind-score>%(SCOR)s</DIV>
-            <DIV class=ind-max>%(MAX)s</DIV>
-        </DIV>
-        <BR clear=all>
-    """ % {'INID': ind['inid'], 'GP': ind['indgrp'], 'NUM': ind['indnum'], 'TEXT': text, \
-        'GUIDE': guide, 'SCOR': score, 'MAX': ind['maxpts']}
-    return html    
+    scoring = HTML_clean(ind['scoring'], br=True)
+    # now create the table stucture with the cleaned up text for the 'indicator' part of the first row
+    html = """ <TR class=ind-row-A id=ind-A-%(INID)s >
+            <TD onclick='toggleIndTable(%(INID)s)' id=c1>%(GP)s.%(NUM)s</TD>
+            <TD onclick='toggleIndTable(%(INID)s)' id=c2>%(TEXT)s</TD>
+        """  % {'INID': inid, 'GP': ind['indgrp'], 'NUM': ind['indnum'], 'TEXT': text}  
+    # retrieve commodity and sub-indicators for this indicator id
+    qry = getCursor()
+    if cdlist is None:
+        cdtext=""
+    else:
+        cdtext= " AND (i.cid = ANY (ARRAY%s) OR i.cid IS NULL) " % str(cdlist)
+    query = """SELECT i.sid, i.cid, c.commodity, xltext AS score
+    	FROM f500.ind_detail AS i 
+    	LEFT JOIN f500.commodities AS c ON i.cid=c.cid 
+    	LEFT JOIN f500.assmnt_parts AS p ON i.atype=p.atype 
+    	LEFT JOIN f500.xldata AS x ON i.xlrow=x.xlrow AND p.xlcol=x.xlcol 
+    	WHERE i.inid=%s AND x.flid=%s AND (p.ptype = 'S' OR p.ptype IS NULL) %s
+    	ORDER BY 1, 2, 4""" % (inid, fileid, cdtext)	
+    qry.execute(query)	
+    #debug += "<P>Query:<BR>%s</P>" % query    
+    #debug += "<P>Query returned %s rows</P>" % qry.rowcount
+    if qry.rowcount==0:
+        # query returned no rows - clean up html for this table row and return it
+        html += "<TD>&nbsp;</TD></TR>"
+        return (html, debug)
+    # create first level sub-table to go in cell 3 of indicator row.  
+    tbl1 =""
+    # generate one row for each sid/commodity combination
+    rows = qry.fetchall()
+    br = ""         #line break tag, empty for first row
+    id=0
+    for row in rows:
+        # texts for score, sid reference and commdity
+        # scores in format 1, 1.5, 1.25 or - for false/None, 5 characters
+        if row['score'] is None or str(row['score']).lower().strip()=='false':
+            score = "&nbsp;-&nbsp;"
+        else:    
+            score = "{:5.3g}".format(float(row['score']))    
+        # indicator cross- reference shown in brackets, if present    
+        if row['sid'] is None:
+            sid_txt = '&nbsp;' 
+            sid='0'
+        else:
+            sid = str(row['sid'])           # change sid from 12345 to '3.45'
+            sid_txt = "(%s.%s)" % (sid[2], sid[3:])  
+        # commodity name                   
+        if row['commodity'] is None:
+            cd_txt = '&nbsp;' 
+            cid='0'
+        else:
+           cd_txt = row['commodity']  
+           cid = str(row['cid'])   
+        id += 1   
+        tbl1 += """%(BR)s<SMALL>%(CT)s&nbsp;%(ST)s&nbsp;<SMALL><B>%(SCORE)s</B>
+                <IMG id=img%(INID)s-%(ID)s src='img/note_btn.png' border=0 height=10px width=10px 
+                onclick="showIndDetails(%(ID)s, %(INID)s, %(CID)s, %(SID)s, %(FLID)s)">&nbsp;
+                """  % {'BR': br, 'CT': cd_txt, 'ST': sid_txt, 'SCORE': score, \
+                    'ID': id, 'INID': inid, 'CID': cid, 'SID': sid, 'FLID': fileid}  
+        br = "<BR>&nbsp;"     # line break to preced next row (if any)   
+    # add indicator details to last cell of row    
+    html += "<TD>" + tbl1 + "</TD></TR>"    
+    # populate second row with additional text        
+    html += """
+        <TR class=ind-row-B id=ind-B-%(INID)s>            
+            <TD colspan=2>%(GUIDE)s</TD>
+            <TD colspan=1>%(SCOR)s</TD>
+        </TR>
+    """ % {'INID': inid, 'GUIDE': guide, 'SCOR': scoring}
+    #debug += "<P>Final HTML:<BR> %s</P>" % HTML_clean(html)   
+    return (html, debug)    
 
+def f500_indNotes(inid, cid, sid, flid, imgid):
+    # returns HTML to populate indicator notes popup 
+    # see also javascript showIndDetails() in f500.js
+    # and HTML_indMain where call to this function declared as onclick event
+    # parameters are indicator id (inid), commodity index (cid), 'scope of' indicator (sid), 
+    # file id (flid), and imgid, which is ID of the IMG button that called this routine
+    #
+    # construct WHERE sub-clauses if sid or cid are set
+    wh_sid = " AND i.sid=%s " % sid if sid>'0' else ""
+    wh_cid = " AND i.cid=%s " % cid if cid>'0' else ""
+    # run query to collect notes for this indicator
+    query = """SELECT p.ptid, p.ptlabel, p.ptype, x.xlcell, xltext 
+    	FROM f500.ind_detail AS i 
+    	INNER JOIN f500.assmnt_parts AS p ON i.atype=p.atype 
+    	LEFT JOIN f500.xldata AS x ON i.xlrow=x.xlrow AND p.xlcol=x.xlcol 
+    	WHERE i.inid=%(INID)s AND x.flid=%(FLID)s %(CID)s %(SID)s
+    	ORDER BY 1, 2, 4""" % {'INID': inid, 'FLID': flid, 'CID': wh_cid, 'SID': wh_sid}
+    qry = getCursor()
+    qry.execute(query)	
+    # close button at top right of DIV		
+    html = """<IMG id=close src='img/delete.png' alt='Close Window' onclick='closeIndNotes("%s")'><BR clear=all>""" % imgid
+    if qry.rowcount>0:
+        # 3-column table for output
+        html += "<TABLE>"
+        # loop through data row
+        rows = qry.fetchall()
+        for row in rows:
+        
+            # wrap text with <BR> tags at 100 chars max.  
+            text = HTML_lines(row['xltext'], width=100)
+            # substitute any URLs with Anchor <A> tags
+            text = HTML_link(text)
+            # append to table
+            html += "<TR><TD>%s</TD><TD>%s</TD><TD>%s</TD></TR>" % (row['xlcell'], row['ptlabel'], text)
+        # close table
+        html += "</TABLE>"        
+    else:
+        html += "<P>No notes found!</P>" % query
+    return html
+
+def HTML_link(text):
+    # search for apparent hypertext links in text and wrap them in <A> tags pointing at the URL given
+    # regex from JG Soft Library to match URLs, plus case-insensitive option
+    urlrgx = re.compile('(?:(?:https?|ftp|file)://|www\.|ftp\.)[-A-Z0-9+&@#/%=~_|$?!:,.]*[A-Z0-9+&@#/%=~_|$]',re.I)
+    # working copy of text 
+    html = text
+    # find all matching URL-like texts in target
+    for murl in urlrgx.finditer(text):
+        # create anchor link
+        anchor = "<A href='%(URL)s' target=_blank class=note-link>%(URL)s</A>" % {'URL': murl.group()}
+        html = html.replace(murl.group(), anchor)
+    return html     
+        
 def HTML_clean(text, br=False):
     # replaces the characters &<>"' with HTML equivalents to avoid problems when injecting text into HTML    
     badch = '&<>"\''
@@ -1332,10 +1612,22 @@ def HTML_clean(text, br=False):
         # replace cr/lf with <BR>
         txt = re.sub('\r\n*', "<BR>", txt)           
     return txt
+
+def HTML_lines(text, width=50):
+    # converts a block of text or a long text line into a block of lines at most
+    # 'width' chars long separated by <BR> tags.  Note this also cleans HTML of <>'" etc
+    lines = textwrap.TextWrapper(width=width)
+    text_lines = lines.wrap(text)
+    # initialise HTML with first line of text
+    html = text_lines[0]
+    # add following lines preceded by line break.        
+    for aline in text_lines[1:]:
+        html += "<BR>" + aline
+    return html    
         
 def HTML_button(name, label, value, css="", onclick=""):
     # returns HTML for a button with text 'label', CSS 'class', javascript 'onclick'
-    html = "<BUTTON name=%s, id=%s, value='%s' class=%s onclick='%s'>%s</BUTTON>" % \
+    html = "<BUTTON name=%s id=%s value='%s' class=%s onclick='%s' type=button>%s</BUTTON>" % \
             (name, name, value, css, onclick, label)
     return html           
 
@@ -1344,7 +1636,7 @@ def list_debug_info(postFields=None, debug="", show=False):
     # by defualt , switch off.  show=True required to display listing.
     html = "<DIV id='debug'>"   # always create empty DIV.  Javascript may put messages here
     if show:
-        html += "<BR><HR class=debug><P>%s</P>" % debug
+        html += "<BR><HR class=debug><BR>%s" % debug
         if postFields is not None:
             html += "POST fields:<BR>"
             # trap sensibly any errors looping through list of lists
@@ -1366,6 +1658,7 @@ def HTML_select(hdr, sz, name, qry, dflt='', event=''):
 # representing labels and values for the SELECT options. 'event' is text for an event routine such as "onclick = 'doSomeJs()'".
 # The ID of the SELECT will be id+'name', which can be referenced in the sel_onchg() function.  The default option whose
 # label is 'dflt' is check.  'hdr' and 'sz' are a heading for the drop down and size in monospaced characters.
+# Note if the 'dflt' column is of integer type in the query, it should be caste to ::TEXT
     try:
         html = """
         <DIV class=datafield style="width: %(WIDTH)sch">
@@ -1514,6 +1807,7 @@ def HTML_header(title = "Data Manager Development Site", css="main", extras="", 
     <TITLE>Trasepad - %(TITLE)s</TITLE>
     <LINK href="https://www.gc-dz.com/css/%(CSS)s.css" rel="stylesheet"  type="text/css">
     <SCRIPT src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></SCRIPT>
+    <SCRIPT src="https://code.jquery.com/ui/1.12.1/jquery-ui.min.js"></SCRIPT>
     <META charset="UTF-8">
     %(EXTRAS)s
     </HEAD>
