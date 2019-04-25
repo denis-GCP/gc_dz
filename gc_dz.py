@@ -18,6 +18,8 @@
 # v 0.14 27 Mar 2019  Internet links in F500 notes enabled, a few minor tweaks
 # v 0.15 08 Apr 2019  change indicator details popup to table row, a few other fixes
 # v 0.16 11 Apr 2019  f500b module for data entry form added
+# v 0.17 23 Apr 2019  save/undo cycle for f500b under development, fix for session timeout bug
+# v 0.18 25 Apr 2019  company link tool added, not yet tested
 # ------------------------
  
 # CGI interface functions for Python
@@ -221,6 +223,14 @@ def ajaxHandler(environ):
             sid = postFields.get('sid',['0'])[0]  
             html = f500_cofind(sid, ayear, cotype, cofind)
             json_str = json.dumps({'html' : html})   
+        elif actid=="f500.colink":
+            # forest 500 company link tool
+            mode = postFields.get('mode',['0'])[0]
+            flid = postFields.get('flid',['0'])[0] 
+            ucid = postFields.get('ucid',['0'])[0] 
+            f500_cofind(mode, flid, ucid)
+            # this doesn't return anything (all actions are DB updates)
+            json_str = ''   
         elif actid == 'f500a.indNotes':
             inid   = postFields.get('inid',['0'])[0]      
             cid    = postFields.get('cid',['0'])[0]       
@@ -231,7 +241,7 @@ def ajaxHandler(environ):
             json_str = json.dumps({'html' : html})    
         elif actid == 'f500b.update':
             # actions on the company input form.  
-            sid    = postFields.get('sessionid',['0'])[0]       
+            sid    = postFields.get('sid',['0'])[0]       
             flid   = postFields.get('fileid',['0'])[0]
             cell   = postFields.get('cell',['0'])[0]
             elid   = postFields.get('elid',['0'])[0]
@@ -1116,22 +1126,43 @@ def f500_main(sid, environ):
                 tbl += "</TR>"
         elif dd['LISTOPT'] == '2': 
             # query format for grouping tool  ----- to be amended --------
-            query = """SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
-                INNER JOIN f500.filelist AS f ON x.flid=f.flid INNER JOIN f500.dirtree AS d ON f.dtid=d.dtid
-                %s ORDER BY d.cotype, x.coname, d.ayear """ % where
+            query = """SELECT a.cotype, a.ayear, a.coname, c.main, a.flid, c.ucid  FROM f500.company_file AS a 
+                LEFT JOIN f500.coflids AS c USING (flid) %s ORDER BY 1, 3, 2  """ % where
             # get company details
             qry.execute(query)
             # create table headings
             tbl = """<FORM action="%(APP)s?m=f500a&u=%(SID)s" method=POST>
                 <INPUT type="hidden" name="FileID" id="fileid" value=0>
-                <TABLE class=company-list><TR>
+                <TABLE class=company-list style="width: 800px"><TR>
                 <TH style="width: 50px">Type</TH>
                 <TH style="width: 50px">Year</TH>
-                <TH style="width: 250px">Company Name</TH>
-                <TH style="width: 50px">File ID</TH>
-                <TH style="width: 350px">Filename</TH>
-                <TH style="width: 100px">Last Update</TH>
+                <TH style="width: 350px">Company Name</TH>
+                <TH style="width: 50px">Main</TH>
+                <TH style="width: 75px">File ID</TH>
+                <TH style="width: 75px">Co ID</TH>
+                <TH style="width: 75px">Link</TH>
+                <TH style="width: 75px">Unlink</TH>
                 </TR>""" % {'APP': scriptnm, 'SID': sid}
+            # create table body
+            for row in qry:
+                tbl += "<TR>"
+                # company type, year, company name
+                tbl += "<TD title='supply chain company(CO) or financial institution/investor(FI)'>%s</TD>" % row['cotype']
+                tbl += "<TD>%s</TD>" % row['ayear']
+                tbl += "<TD>%s</TD>" % row['coname']
+                # checkbox for 'main' name, ticked if main is True, calls clickMain in f500.js when changed
+                chk = 'checked' if row['main'] else ''
+                tbl += """<TD title='tick if preferred name or company to link with' style="text-align:center">
+                <INPUT type=checkbox id=main%s onchange='clickMain(this)' %s></TD>"""  % (row['flid'], chk)
+                # file and company ID
+                tbl += "<TD title='company file ID for year' style='text-align:right'>%s</TD>" % row['flid']
+                # Unique company ID
+                ucid = row['ucid'] if row['ucid'] is not None else ''
+                tbl += "<TD id=ucid%s title='unique company ID' style='text-align:right'>%s</TD>" % (row['flid'], ucid)
+                # action buttons to link or unlink companies
+                tbl += "<TD style='text-align:center'><INPUT type=button class=tiny onclick='linkButton(%s)' title='click to link to main co.'></TD>" % row['flid']
+                tbl += "<TD style='text-align:center'><INPUT type=button class=tiny onclick='unlinkButton(%s)' title='click to unlink from main co.'></TD>" % row['flid']                 
+                tbl += "</TR>"
         elif dd['LISTOPT'] == '3': 
             # query format with file names
             query = """SELECT d.cotype, d.ayear, x.coname, x.flid, f.flname, DATE(f.fltime) FROM f500.xlcohdr AS x 
@@ -1347,9 +1378,22 @@ def f500_cofind(sid, ayear, cotype, cofind):
             html += "<P>...(more)...<P>"
     return html        
 
-def yrass(names):
-    # get a dictionary of years and file IDs eg, {'2014':30, '2015': 401} etc        
-    pass
+def f500_colink_ajax(mode, flid, ucid=0):
+    # Company Linking Tool on F500 Listing, called from f500_main()
+    # mode can be (1) set 'main' flag for flid in coflids table
+    # (2) link current flid with ucid
+    # (3) unset ucid for flid
+    # (4) clear main flag for flid
+    qry = getCursor()
+    if mode==1:
+        qry.execute("UPDATE f500.coflids SET main=TRUE WHERE flid=%s", (flid,))
+    elif mode==2:
+        qry.execute("UPDATE f500.coflids SET ucid=%s WHERE flid=%s", (ucid, flid))
+    elif mode==3:
+        qry.execute("UPDATE f500.coflids SET ucid=NULL WHERE flid=%s", (flid,))
+    elif mode==4:
+        qry.execute("UPDATE f500.coflids SET main=FALSE WHERE flid=%s", (flid,))
+    # nothing to return - any errors handled in ajaxHandler()        
 
 def cmatch_tool(module, sid, environ):
     # implements trase Neural alpha name matching tools
@@ -1489,10 +1533,10 @@ def f500_input(sid, environ):
         cid = cd['cid']
         name = 'cass'
         id = 'cass_%s' % cid
-        html += "<INPUT type=checkbox name=%s id=%s value=%s %s %s>" % (name, id, cid, chk, (jslink % cd['cell']))
+        html += "<INPUT type=checkbox name=%s id=%s value=1 %s %s>" % (name, id, chk, (jslink % cd['cell']))
         html += "&nbsp;<SMALL>%s</SMALL>&nbsp;&nbsp;&nbsp;" % cd['commodity']
     html += "</DIV>"    
-    # action buttons - Save, Undo, Redo, Cancel, Close  
+    # action buttons - Close  
     html += "&nbsp;<INPUT type=button value='Close' onclick='input_close_btn()'>"      
     html += "<BR clear=all>"
     #debug += "<P>Query:<BR>%s</P>" % qry.query    
@@ -1506,7 +1550,7 @@ def f500_input(sid, environ):
     	INNER JOIN f500.cscore_cells AS c ON c.cass=x.xlcell AND c.ayear=d.ayear 
     	WHERE d.cotype='CO' AND x.flid=%s ORDER BY 1
         """, (fileid,))
-    # covert retrieved records into a list of assessed commodities, by index number 
+    # convert retrieved records into a list of assessed commodities, by index number 
     if qry.rowcount>0:
         cdlist = []
         for cd in qry:
@@ -1532,7 +1576,7 @@ def f500_input(sid, environ):
         indlist = qry.fetchall()
         for ind in indlist:
             # generate HTML for main indicator description
-            (htm, dbg) =  HTML_indMain(ind, fileid, cdlist)
+            (htm, dbg) =  f500_input_sub(ind, fileid, cdlist)
             html += htm
             debug += dbg
     # finish off table layout
@@ -1546,16 +1590,104 @@ def f500_input(sid, environ):
     html += list_debug_info(postFields, debug, show=True)
     html += "</BODY></HTML>"    
     return html
+    
+def f500_input_sub(ind, fileid, cdlist):
+    # Handles the subsidiary details of F500 data input for a single main indicator.
+    # Called from 'f500_input()' for each indicator.
+    # Based on and adapted from 'HTML_indMain()' to handle specifics of data  input.
+    # 'ind' has fields inid, indgrp, indnum, indtext, guide, scoring, maxpts
+    # fileid is file being processed.  cdlist is a list of applicable commodity indices, or None 
+    # if commodities not applicable to this file, ie a financial institution
+    #
+    debug=""
+    inid = ind['inid']      # shorthand as field for Indicator ID is referenced repeatedly
+    # first get rid of 'dangerous' characters in the text fields, but keep line breaks.
+    text = HTML_clean(ind['indtext'], br=True)
+    guide = HTML_clean(ind['guide'], br=True)
+    scoring = HTML_clean(ind['scoring'], br=True)
+    # now create the table stucture with the cleaned up text for the 'indicator' part of the first row
+    html = """ <TR class=ind-row-A id=ind-A-%(INID)s >
+            <TD onclick='toggleIndTable(%(INID)s)' id=c1>%(GP)s.%(NUM)s</TD>
+            <TD onclick='toggleIndTable(%(INID)s)' id=c2>%(TEXT)s</TD>
+        """  % {'INID': inid, 'GP': ind['indgrp'], 'NUM': ind['indnum'], 'TEXT': text}  
+    # retrieve commodity and sub-indicators for this indicator id
+    qry = getCursor()
+    if cdlist is None:
+        cdtext=""
+    else:
+        cdtext= " AND (i.cid = ANY (ARRAY%s) OR i.cid IS NULL) " % str(cdlist)
+    query = """SELECT i.sid, i.cid, c.commodity, xltext AS score
+    	FROM f500.ind_detail AS i 
+    	LEFT JOIN f500.commodities AS c ON i.cid=c.cid 
+    	LEFT JOIN f500.assmnt_parts AS p ON i.atype=p.atype 
+    	LEFT JOIN f500.xldata AS x ON i.xlrow=x.xlrow AND p.xlcol=x.xlcol 
+    	WHERE i.inid=%s AND x.flid=%s AND (p.ptype = 'S' OR p.ptype IS NULL) %s
+    	ORDER BY 1, 2, 4""" % (inid, fileid, cdtext)	
+    qry.execute(query)	
+    debug += "<P>Query:<BR>%s</P>" % query    
+    debug += "<P>Query returned %s rows</P>" % qry.rowcount
+    if qry.rowcount==0:
+        # query returned no rows - clean up html for this table row and return it
+        html += "<TD>&nbsp;</TD></TR>"
+        return (html, debug)
+    # create first level sub-table to go in cell 3 of indicator row.  
+    tbl1 =""
+    # generate one row for each sid/commodity combination
+    rows = qry.fetchall()
+    br = ""         #line break tag, empty for first row
+    id=0
+    for row in rows:
+        # texts for score, sid reference and commdity
+        # scores in format 1, 1.5, 1.25 or - for false/None, 5 characters
+        if row['score'] is None or str(row['score']).lower().strip()=='false':
+            score = "&nbsp;-&nbsp;"
+        else:    
+            score = "{:5.3g}".format(float(row['score']))    
+        # indicator cross- reference shown in brackets, if present    
+        if row['sid'] is None:
+            sid_txt = '&nbsp;' 
+            sid='0'
+        else:
+            sid = str(row['sid'])           # change sid from 12345 to '3.45'
+            sid_txt = "(%s.%s)" % (sid[2], sid[3:])  
+        # commodity name                   
+        if row['commodity'] is None:
+            cd_txt = '&nbsp;' 
+            cid='0'
+        else:
+           cd_txt = row['commodity']  
+           cid = str(row['cid'])   
+        id += 1   
+        tbl1 += """%(BR)s<SMALL>%(CT)s&nbsp;%(ST)s&nbsp;<SMALL><B>%(SCORE)s</B>
+                <IMG id=img%(INID)s-%(ID)s src='img/note_btn.png' border=0 height=10px width=10px 
+                onclick="showIndDetails(%(ID)s, %(INID)s, %(CID)s, %(SID)s, %(FLID)s)">&nbsp;
+                """  % {'BR': br, 'CT': cd_txt, 'ST': sid_txt, 'SCORE': score, \
+                    'ID': id, 'INID': inid, 'CID': cid, 'SID': sid, 'FLID': fileid}  
+        br = "<BR>&nbsp;"     # line break to preced next row (if any)   
+    # add indicator details to last cell of row    
+    html += "<TD>" + tbl1 + "</TD></TR>"    
+    # populate second row with additional text        
+    html += """
+        <TR class=ind-row-B id=ind-B-%(INID)s>            
+            <TD colspan=2>%(GUIDE)s</TD>
+            <TD colspan=1>%(SCOR)s</TD>
+        </TR>
+    """ % {'INID': inid, 'GUIDE': guide, 'SCOR': scoring}
+    #debug += "<P>Final HTML:<BR> %s</P>" % HTML_clean(html)   
+    return (html, debug)    
+    
 
 def f500_input_ajax(sid, flid, cell, elid, new_data):
     # processes changes to f500_input form via ajax requests.
     #
     # check session is open and get permission flag for this user
     qry = getCursor()
-    qry.execute("""SELECT permit, email FROM gcdz.logins INNER JOIN gcdz.users USING (userid) 
+    sqlcmd = qry.mogrify("""SELECT permit, email FROM gcdz.logins INNER JOIN gcdz.users USING (userid) 
         WHERE sessionid=%s AND timeout IS NULL""", (sid,))
+    qry.execute(sqlcmd)
     if qry.rowcount==0:
-        reply = {'valid': 0, 'msg': "Session ID '%s' is expired or not found" % sid}
+        msg = "Session ID '%s' is expired or not found" % sid
+        reply = {'valid': 0, 'msg': msg, 'debug': sqlcmd}
         return reply
     # check permit for this user/session is OK for this module (f500b)
     record = qry.fetchone()
@@ -1567,7 +1699,7 @@ def f500_input_ajax(sid, flid, cell, elid, new_data):
     qry.execute("""SELECT xlid, xltext FROM f500.xldata WHERE flid=%s AND xlcell=%s""", (flid, cell))
     if qry.rowcount==0:
         # cell-file ID combination not yet in system - add them
-        qry.execute("INSERT INTO f500.xldata (flid, xlcell, xltext) RETURNING xlid")
+        qry.execute("INSERT INTO f500.xldata (flid, xlcell, xltext) VALUES(%s, %s, %s) RETURNING xlid", (flid, cell, new_data))
         # create record in audit table for new entry
         record = qry.fetchone()
         xlid = record['xlid']
@@ -1582,7 +1714,7 @@ def f500_input_ajax(sid, flid, cell, elid, new_data):
         # update record in xldata
         qry.execute("UPDATE f500.xldata SET xltext=%s WHERE xlid=%s", (new_data, xlid));   
     # return a valid result
-    reply = {'valid': 0}
+    reply = {'valid': 1}
     return reply   
 
 def f500_assess(sid, environ):
