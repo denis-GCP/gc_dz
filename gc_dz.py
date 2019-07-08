@@ -1,5 +1,5 @@
 """
- ------------- gc_dz.py version 0.25 Jun 2019 ------------
+ ------------- gc_dz.py version 0.92 Jul 2019 ------------
  This module handles all the server-side active content for the gc-dz.com 
  website.  It is called using the WSGI interface via the gc-dz.com/exec alias.  
  The entry point for /exec calls is the application() function.  This returns
@@ -16,6 +16,9 @@
 # --- recent revision history ---
 # v 0.20+ 14 May 2019 ff mods to f500_input() to change layout of fields
 # v 0.25 19 Jun 2019 Link fields and download action in f500_savelink_ajax()
+# v 0.26 24 Jun 2019 Form status displayed in listing, with actions done in code
+# v 0.91 01 Jul 2019 Pre-production version, webform tested and working
+# v 0.92 08 Jul 2019 Commodity checkbox list by companies implemented
 # -------------------------------
  
 # CGI interface functions for Python
@@ -228,6 +231,14 @@ def ajaxHandler(environ):
             f500_colink_ajax(mode, flid, ucid)
             # this doesn't return anything (all actions are DB updates)
             json_str = ''   
+        elif actid=="f500.comChkBox":
+            # forest 500 commodity checkbox update
+            sessid = postFields.get('sessid',['0'])[0]
+            flid = int(postFields.get('flid',['0'])[0]) 
+            cid = int(postFields.get('cid',['0'])[0]) 
+            tick = int(postFields.get('tick',['0'])[0]) 
+            reply = f500_comChkBox_ajax(sessid, flid, cid, tick)
+            json_str = json.dumps(reply)
         elif actid == 'f500a.indNotes':
             inid   = postFields.get('inid',['0'])[0]      
             cid    = postFields.get('cid',['0'])[0]       
@@ -722,7 +733,6 @@ def SCTN_form(platid, sid):
             hrow = hrow.replace('#?', str(n))
         html += hrow       
     # finish off HTML form - back link on bottom row right
-    global scriptnm
     html += """<TR style="background-color: #ffffff"><TD COLSPAN='3'></TD>
         <TD align='right'><A href='%s?m=sctn&u=%s'>Back to list</A></TD>
         </TR>""" % (scriptnm, sid)
@@ -1034,7 +1044,7 @@ def f500_main(sid, environ):
         dd['AYEAR'] = postFields.get('ayear', [''])[0]
         dd['COTYPE'] = postFields.get('cotype', [''])[0] 
         dd['FILTER'] = postFields.get('filter', [''])[0] 
-        dd['LISTOPT'] = postFields.get('listopt', [''])[0] 
+        dd['LISTOPT'] = postFields.get('listopt', ['4'])[0] 
         # save as defaults 
         qry.execute("""INSERT INTO gcdz.def_data (sessionid, ddtag, ddinfo) VALUES (%(SID)s, 'F500_List', %(DD)s)   
             ON CONFLICT ON CONSTRAINT defdata_pk DO UPDATE SET ddinfo= %(DD)s 
@@ -1061,7 +1071,8 @@ def f500_main(sid, environ):
     # Filter input selector
     html += HTML_input("Filter<SMALL> (regular expression)</SMALL>", 30, "filter", dflt=dd['FILTER'], event="onkeyup='updateColist()'");
     # list options
-    qry.execute("select unnest(array['Summary scores', 'Company Linking Tool', 'Excel filenames','2019 Assessments']),unnest(array['1', '2', '3', '4'])")
+    qry.execute("""select unnest(array['Summary scores', 'Company Linking Tool', 'Excel filenames','2019 Assessments', 
+        'Commodity checkboxes']),unnest(array['1', '2', '3', '4', '5'])""")
     html += HTML_select("Listing Format", 24, "listopt", qry, dflt=dd['LISTOPT']);
     # update button
     html += '<INPUT type="submit" name="Update" id="update" value="Update">'
@@ -1255,6 +1266,43 @@ def f500_main(sid, environ):
                 for col in row:
                     tbl += "<TD>%s</TD>" % col
                 tbl += "</TR>"
+        elif dd['LISTOPT'] == '5': 
+            # commodity checkboxes
+            qry.execute("select cid, commodity from f500.commodities where cid>0 order by cid")
+            cdlist = qry.fetchall()
+            query = """SELECT cotype, ayear, coname, flid, array_agg(cid ORDER BY cid) as commodities FROM f500.company_file  
+                LEFT JOIN f500.comtraders USING (flid) %s GROUP BY 1,2,3,4 ORDER BY 1, 3, 2""" % where
+            # get company details
+            qry.execute(query)
+            rows = qry.fetchall()
+            # create table headings
+            tbl = """<FORM action="%(APP)s?m=f500b&u=%(SID)s" method=POST>
+                <INPUT type=hidden id=sessionid name=sessionid value=%(SID)s>
+                <TABLE class=company-list><TR>
+                <TH style="width: 50px">Type</TH>
+                <TH style="width: 50px">Year</TH>
+                <TH style="width: 250px">Company Name</TH>
+                <TH style="width: 50px">File ID</TH>
+                """ % {'APP': scriptnm, 'SID': sid}
+            for cd in cdlist:
+                tbl += "<TH class=commodities>%s</TH>" % cd['commodity']
+            tbl += "</TR>"    
+            # create table body
+            for row in rows:
+                tbl += "<TR>"
+                tbl += "<TD>%s</TD>" % row['cotype']
+                tbl += "<TD>%s</TD>" % row['ayear']
+                tbl += "<TD>%s</TD>" % row['coname']
+                tbl += "<TD>%s</TD>" % row['flid']
+                cd = row['commodities']
+                for c in range(len(cdlist)):
+                    if c+1 in row['commodities']:
+                        chk = 'checked'
+                    else:
+                        chk = ''
+                    tbl += "<TD class=commodities><INPUT type=checkbox id=chk-%s-%s %s onchange='updateCommodity(this)'></TD>" \
+                        % (row['flid'], c+1, chk)            
+                tbl += "</TR>"
         else:
             raise RuntimeError("Unrecognised option code '%s'!" % dd['LISTOPT'])        
         tbl += "</TABLE></FORM>"          
@@ -1263,7 +1311,7 @@ def f500_main(sid, environ):
         tbl = "<P><SMALL>Make a selection from the drop down lists and click <B>Update</B> to see the company list...</SMALL></P>"
     html += tbl
     # ---- debugging information 
-    html += list_debug_info(postFields, debug, show=False)
+    html += list_debug_info(postFields, debug, show=True)
     html += HTML_footer(environ)
     return html
 
@@ -1435,6 +1483,26 @@ def f500_colink_ajax(mode, flid, ucid=0):
     # nothing to return - any errors handled in ajaxHandler()
     #raise RuntimeError(qry.query)
     qry.connection.commit()
+
+def f500_comChkBox_ajax(sessid, flid, cid, tick):
+    reply = f500_edit_check(sessid)
+    if reply['valid'] == 1:
+        qry = getCursor()
+        try:
+            # if tick is 1, add commodity to table comtraders, if 0 delete it
+            if tick==1:
+                qry.execute("INSERT INTO f500.comtraders (flid, cid) VALUES(%s, %s) ON CONFLICT DO NOTHING", (flid, cid))
+            elif tick==0:    
+                qry.execute("DELETE FROM f500.comtraders WHERE flid=%s AND cid=%s", (flid, cid))
+            else:
+                raise RuntimeError("Invalid tick value (%s)" % tick) 
+            qry.connection.commit()      
+        except Exception as e:
+            # give traceback and diagnostics
+            reply['msg'] = str(e)
+            reply['debug'] = "<PRE>\n" + traceback.format_exc() + "\n</PRE>"
+            reply['valid'] = 0
+    return reply  
       
 def cmatch_tool(module, sid, environ):
     # implements trase Neural alpha name matching tools
@@ -1526,7 +1594,7 @@ def f500_input(sid, environ):
                 WHERE f.flid=%s """, (fileid,))
     if qry.rowcount==0:
         # show error heading, message and Close button
-        html =  HTML_header(title= "Forest 500 Assessment - Error", width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
+        html =  HTML_header(title= "Forest 500 Data Input - Error", width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
         html += "<P class=error style='display: block'>Company ID not specified</P>" 
         html += "<p>&nbsp;</p><INPUT type=button value='Close' onclick='window.close()'>"
         html += "</BODY></HTML>"    
@@ -1534,11 +1602,6 @@ def f500_input(sid, environ):
     # get company details and construct page heading    
     co = qry.fetchone()
     title = "Forest 500 Data Input %s : %s" % (co['ayear'], co['coname'])
-    # add javascript library for autosize function for textareas (see jacklmoore.com/autosize)
-    #js += '<SCRIPT src="https://www.gc-dz.com/js/autosize.js"></SCRIPT>'
-    # HTML BODY onload function to set up autosize facility
-    #onbody = 'onload="input_setup()"'
-    #html =  HTML_header(title, width=1000, css="f500", extras=js, params=onbody, menulink = (sid, scriptnm))
     html =  HTML_header(title, width=1000, css="f500", extras=js, menulink = (sid, scriptnm))
     # current year as integer
     cyear = int(co['ayear'])
@@ -1549,13 +1612,13 @@ def f500_input(sid, environ):
     y = cyear - 2014
     # standard javascript events to go on all INPUT fields, needs cell address for %s
     jslink = "onkeydown='input_key(event, this)' onchange='input_save(this, \"%s\")'" 
-    # HTML for form heading - but note this is processed via ajax, not submit 
-    #html += "<FORM action='%(APP)s?m=f500b&u=%(SID)s' id=form1 method=POST>" % {'APP': scriptnm, 'SID': sid}
-    #html += "<FORM id=form1>" 
     # these hidden fields are for the f500.js routine input_save() to pick up
     html += "<INPUT type=hidden id=fileid name=fileid value=%s>" % fileid
     html += "<INPUT type=hidden id=sessionid name=sessionid value=%s>" % sid
     html += "<INPUT type=hidden id=scriptnm name=scriptnm value=%s>" % scriptnm
+    # if company has not been edited before, update 'viewed' status
+    qry.execute("UPDATE f500.survey_status SET statid=1, sessionid=%s, lastupd=now() WHERE flid=%s AND statid in (0, 1)", \
+        (sid, fileid))
     # advisory text at top of page (below header section)
     html += """<SMALL>All edits are tracked and saved as they are made.  </SMALL>"""  
     html += "<BR clear=all>"
@@ -1595,8 +1658,8 @@ def f500_input(sid, environ):
     btn_val = HTML_clean(gp['igid'])
     html += """<TR class=btn-row><TD colspan=5>%s</TD></TR>""" % HTML_button(name, btn_text, btn_val,'ind-gp-btn', js)     
     # retrieve indicator details for this group
-    qry.execute("""SELECT DISTINCT inid, indgrp, indnum, indtext, guide, scoring, maxpts FROM f500.ind_main 
-        WHERE inid/100 = %s ORDER BY 1""",(int(gp['igid']),))
+    qry.execute("""SELECT DISTINCT inid, indgrp, indnum, indtext, guide, scoring, maxpts, atype FROM f500.ind_main 
+              INNER JOIN f500.ind_detail USING (inid) WHERE inid/100 = %s ORDER BY 1""",(int(gp['igid']),))
     indlist = qry.fetchall()
     for ind in indlist:
         # generate HTML for main indicator description
@@ -1606,37 +1669,16 @@ def f500_input(sid, environ):
     # commodity specific indicators group button
     html += "<TR class=btn-row>"    
     html += "<TD colspan=5>"
-    html += HTML_button("ComIndBtn", "Commodity-specific Indicators", 1,'ind-gp-btn', 'toggleComInds()') 
-    # put in a few spaces before checkboxes
-    html += "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
-    # checkboxes for commodities - get commodities assessed for this company
-    qry.execute("""SELECT cid, commodity, xltext AS assd, c.cass as cell FROM f500.commodities
-    	INNER JOIN f500.cscore_cells AS c using (cid)
-    	left JOIN f500.xldata AS x ON c.cass=x.xlcell AND x.flid=%s 
-    	WHERE c.ayear=%s
-    	ORDER BY cid
-        """, (fileid, cyear))
-    cdlist = qry.fetchall()
-    # HTML for commodity checkboxes
-    jslink = "onkeydown='input_key(event, this)' onchange='input_save(this, \"%s\"); toggleComInds(%s);'" 
-    for cd in cdlist:
-        if cd['assd'] is None:
-            chk=''
-        else:    
-            chk = 'checked' if re.match(r'^(Y|1)',cd['assd'], re.I) else '' 
-        cid = cd['cid']
-        name = 'cass'
-        id = 'cass_%s' % cid
-        html += "<INPUT type=checkbox name=%s id=%s value=1 %s %s>" % (name, id, chk, (jslink % (cd['cell'], cid)))
-        html += "&nbsp;<SMALL>%s</SMALL>&nbsp;&nbsp;&nbsp;" % cd['commodity']       
+    html += HTML_button("ComIndBtn", "Commodity-specific Indicators", 1,'ind-gp-btn') 
     html += "</TD></TR>"     
     # commodity specific indicators list
     qry.execute("""SELECT d.cid, coalesce(d.sid, m.inid, 9999999) AS refid, m.inid,  c.commodity, m.indgrp, 
-        m.indnum, m.indtext, m.guide, m.scoring, d.detid
+        m.indnum, m.indtext, m.guide, m.scoring, d.detid, d.atype
     	FROM f500.ind_main AS m INNER JOIN f500.ind_detail AS d USING (inid) 
     	INNER JOIN f500.commodities AS c USING (cid)
-    	WHERE cid IS NOT NULL AND cotype=%s AND ayear=%s
-    	ORDER BY 1,2,3;""",(co['cotype'], cyear))
+    	INNER JOIN f500.comtraders as t ON t.flid=%s AND t.cid=c.cid
+    	WHERE d.cid IS NOT NULL AND cotype=%s AND ayear=%s
+    	ORDER BY 1,2,3;""",(fileid, co['cotype'], cyear))
     indlist = qry.fetchall()
     # initialise variables to detect change in commodity, cross-referenced indicators
     last_cid=0   # do new commodity heading when this changes
@@ -1645,7 +1687,7 @@ def f500_input(sid, environ):
         # test for new commodity group
         if ind['cid']!=last_cid:
             # do commodity heading
-            html += """<TR id=comhdr-%(ID)s style="display: none"><TD colspan=2></TD>
+            html += """<TR id=comhdr-%(ID)s ><TD colspan=2></TD>
                 <TD  class=comhdr onclick="toggleCommodity(%(ID)s)">%(LABEL)s</TD><TD colspan=2></TD>
                 </TR>""" % {'ID': ind['cid'], 'LABEL': ind['commodity']}
             last_cid = ind['cid']
@@ -1676,7 +1718,8 @@ def f500_input(sid, environ):
         btn_val = HTML_clean(gp['igid'])
         html += """<TR class=btn-row><TD colspan=5>%s</TD></TR>""" % HTML_button(name, btn_text, btn_val,'ind-gp-btn', js)     
         # retrieve indicator details for this group
-        qry.execute("""SELECT DISTINCT inid, indgrp, indnum, indtext, guide, scoring, maxpts FROM f500.ind_main 
+        qry.execute("""SELECT DISTINCT inid, indgrp, indnum, indtext, guide, scoring, maxpts, atype FROM f500.ind_main 
+            INNER JOIN f500.ind_detail USING (inid)
             WHERE inid/100 = %s ORDER BY 1""",(int(gp['igid']),))
         indlist = qry.fetchall()
         for ind in indlist:
@@ -1754,14 +1797,15 @@ def f500_input_indrow(ind, fileid, indent=False, cid=0):
     #tbl = f500_input_indata(inid, fileid, refid, cid)
     html += """
         <TR class=ind-row-C id=ind-C-%(INID)s>
-            <TD>
+            <TD class=super-feint>
                 <INPUT id=C-cid-%(INID)s  type=hidden value=%(CID)s>
                 <INPUT id=C-flid-%(INID)s type=hidden value="%(FLID)s">
                 <INPUT id=C-refid-%(INID)s  type=hidden value=%(REFID)s>
+                %(ATYPE)s
             </TD>            
             <TD id=Tbl-C-%(INID)s colspan=4>&nbsp;</TD>
         </TR>
-    """ % {'INID': rowid, 'FLID': fileid, 'REFID': refid, 'CID': cid}
+    """ % {'INID': rowid, 'FLID': fileid, 'REFID': refid, 'CID': cid, 'ATYPE': ind['atype']}
     return (html, debug)    
 
 def f500_input_table_ajax(inid, flid, refid=0, cid=0):
@@ -1785,18 +1829,17 @@ def f500_input_table_ajax(inid, flid, refid=0, cid=0):
         wh_cid = " AND cid=%s " % cid if cid>0 else ""
         # sub-indicator modifer if refid is not the same as inid
         wh_sid = " AND sid = %s " % refid if refid>0 and str(refid)!=inid else ""
-        sql_a = """SELECT ptid, ptlabel, ptype, alist, layout, concat(xlcol, xlrow::TEXT) AS xlcell 
+        sql_a = """SELECT atype, ptid, ptlabel, ptype, alist, layout, concat(xlcol, xlrow::TEXT) AS xlcell 
 	        FROM f500.assmnt_parts INNER JOIN f500.ind_detail USING (atype) 
             WHERE inid=%(INID)s %(CID)s %(SID)s
             """ % {'INID': inid, 'CID': wh_cid, 'SID': wh_sid}
-        sql = """SELECT ptid, ptlabel, ptype, alist, layout, a.xlcell, xltext 
+        sql = """SELECT atype, ptid, ptlabel, ptype, alist, layout, a.xlcell, xltext 
             FROM (%s) AS a LEFT JOIN f500.xldata AS x ON a.xlcell=x.xlcell AND x.flid=%s ORDER BY ptid
         """  % (sql_a, flid)   
         qry.execute(sql)
         rows = qry.fetchall()
         # save query text for debug output if an exception occurs
         debug += "<P>%s</P>" %  sql    
-        debug += "<P>rowcount: %s <BR>len(rows): %s</P>" % (qry.rowcount, len(rows))
         if qry.rowcount==0:
             raise RuntimeError("Input spec. not defined for this indicator!" )
         # start HTML for input form table
@@ -1813,6 +1856,8 @@ def f500_input_table_ajax(inid, flid, refid=0, cid=0):
             cell = row['xlcell']
             # get layout info to construct TD tag
             lyt = row['layout']
+            if lyt is None:
+                raise RuntimeError("Bad input spec. for this indicator! [atype=%s]" % row['atype'])            
             # get rowspan indications defined after * separator (must be at end of string)
             k = lyt.find('*')
             if k >= 0:
@@ -1871,6 +1916,16 @@ def f500_input_table_ajax(inid, flid, refid=0, cid=0):
                 text_div = """<DIV id=link-%(CELL)s class=indata contenteditable=true onkeydown='input_key(event, this)'   
                    onblur='input_save_link(this, %(INID)s, %(SID)s, %(CID)s)'>%(TEXT)s</DIV>""" 
                 tbl += text_div % {'TEXT': xltext, 'CELL': row['xlcell'], 'INID': inid, 'CID': cid, 'SID': refid}
+            if row['ptype']=='H':
+                # date input and validation (allows eg 23 jun 2019, 23/6/2019, Jun 2019, 6/2019)
+                text_div = """<INPUT type=text id=indata-%(CELL)s class=date value="%(TEXT)s"
+                   onchange='input_save_date(this, cell="%(CELL)s")'> """ 
+                tbl += text_div % {'TEXT': xltext, 'CELL': row['xlcell']}                    
+            if row['ptype']=='I':
+                # number + units input and validation (allows eg 123,456 mt, 2003.456 kg )
+                text_div = """<INPUT type=text id=indata-%(CELL)s class=num value="%(TEXT)s"
+                   onchange='input_save_num(this, cell="%(CELL)s")'> """ 
+                tbl += text_div % {'TEXT': xltext, 'CELL': row['xlcell']}                    
             tbl += "</TD>"            
             # check for end of row 
             if rnum==1 and cnum>=3:
@@ -1891,7 +1946,7 @@ def f500_input_table_ajax(inid, flid, refid=0, cid=0):
         tbl = debug + "<PRE>" + traceback.format_exc() + "</PRE>"        
     return tbl
 
-def HTML_checklist(id, alist, adata='', onchg='', values=None, css='', multi=False, wrap=60):
+def HTML_checklist(id, alist, adata='', onchg='', values=None, css='', multi=False, wrap=40):
     # used by the input_table_ajax routine to generate a list of checkboxes or radio buttons
     # id - ID used to id and name checkboxes/radio buttons
     # alist - list of texts for buttons
@@ -1903,6 +1958,7 @@ def HTML_checklist(id, alist, adata='', onchg='', values=None, css='', multi=Fal
     # wrap - lines wrapped with <BR> if next box+text would exceed 'wrap' characters per line
     htm = "<DIV class=%s>" % css if css>'' else "<DIV>"
     ch_count = 0    # counts characters per line, to trigger wrap when necessary
+    firstLine = True    # flag to avoid line break before first line
     if not type(alist) is list:
         raise RuntimeError("Missing options list for selection (id=%s)" % id)
     # loop through list elements
@@ -1916,19 +1972,14 @@ def HTML_checklist(id, alist, adata='', onchg='', values=None, css='', multi=Fal
             v=i    
         # html for button + text 
         btn = "<INPUT type=%s name=%s value='%s' title='%s' onchange='%s' %s>" % (bt, id, v, alist[i], onchg, chk)
-        # insert <BR> if word wrap limit reached
-        nch = 2 + len(alist[i])    
-        if ch_count+nch > wrap:
-            # do word wrap and reset character count for the line
-            htm += '<BR>'
-            ch_count = 0
-        elif ch_count>0:
-            # add 3 non-breaking spaces 
-            htm += '&nbsp;&nbsp;&nbsp;'
-            ch_count += 3            
+        # do a line break except for first line          
+        if firstLine: 
+            firstLine = False
+        else:
+            htm += '<BR>'    
         # add button and text to HTML
         htm += btn + "&nbsp;" + alist[i]
-        ch_count += nch
+        #ch_count += nch
      # close off DIV  and return the HTML
     htm += "</DIV>"
     return htm         
@@ -1990,7 +2041,10 @@ def f500_audit_save(sid, flid, cell, new_data):
         qry.execute("INSERT INTO f500.xldata_audit (xlid, sid, ts, oldval, newval) VALUES(%s, %s, NOW(), %s, %s)", \
             (xlid, sid, old_data, new_data))
         # update record in xldata
-        qry.execute("UPDATE f500.xldata SET xltext=%s WHERE xlid=%s", (new_data, xlid));      
+        qry.execute("UPDATE f500.xldata SET xltext=%s WHERE xlid=%s", (new_data, xlid)); 
+    # update status record for this form to show it has been edited, and by whom         
+    qry.execute("UPDATE f500.survey_status SET statid=2, sessionid=%s, lastupd=now() WHERE flid=%s AND statid in (0, 1)", \
+        (sid, flid))
 
 def f500_select_ajax(sessid, flid, cell_t, cell_s, optval, opttxt):
     # processes changes to f500_input form assessment selection and score via ajax.
